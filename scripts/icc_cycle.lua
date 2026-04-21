@@ -51,4 +51,19 @@ local function next_profile()
     apply_profile(profiles[index])
 end
 
+local function prev_profile()
+    if #profiles == 0 then
+        mp.osd_message("No ICC profiles found!")
+        return
+    end
+
+    index = index - 1
+    if index < 1 then
+        index = #profiles
+    end
+
+    apply_profile(profiles[index])
+end
+
 mp.add_key_binding("Ctrl+i", "next-icc", next_profile)
+mp.add_key_binding("Ctrl+j", "prev-icc", prev_profile)
