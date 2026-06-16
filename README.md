@@ -10,6 +10,7 @@ Each tool is independent: copy only the ones you want.
 | --- | --- | --- |
 | [Horizontal flip](#horizontal-flip) | `scripts/hflip.lua`, `shaders/hflip.glsl` | Mirror the video with one key |
 | [ICC profile cycler](#icc-profile-cycler) | `scripts/icc_cycle.lua` | Switch between the ICC profiles in your `colors` folder |
+| [OLED vibrance](#oled-vibrance) | `shaders/Vibrance-OLED.glsl` | Vibrance with skin tone protection and deeper OLED blacks |
 
 ## Installation
 
@@ -53,6 +54,31 @@ Cycles through the `.icm` color profiles in `~~/colors` (the `colors` folder of 
 | <kbd>Ctrl</kbd>+<kbd>J</kbd> | Previous profile |
 
 Profiles are sorted by name. Put your `.icm` files in `colors/` and restart mpv.
+
+## OLED vibrance
+
+`shaders/Vibrance-OLED.glsl` boosts muted colors while leaving skin tones, midtones and highlights natural, then deepens shadows the way an OLED panel would, with a gentle cinematic contrast curve on top.
+
+Load it from `mpv.conf`:
+
+```
+glsl-shaders-append="~~/shaders/Vibrance-OLED.glsl"
+```
+
+Every effect is a parameter you can tune with `glsl-shader-opts` (needs `vo=gpu-next`):
+
+| Parameter | Default | Range | Effect |
+| --- | --- | --- | --- |
+| `vibrance_strength` | `0.3` | 0–1 | Overall vibrance boost |
+| `skin_strength` | `0.5` | 0–1 | How much skin tones are protected |
+| `midtone_strength` | `0.6` | 0–1 | Extra boost for midtones |
+| `luma_strength` | `0.4` | 0–1 | Protection for very dark and very bright areas |
+| `oled_strength` | `0.15` | 0–0.2 | Shadow crush (deeper blacks) |
+| `cinema_strength` | `0.04` | 0–0.1 | Global S-curve contrast |
+
+```
+glsl-shader-opts=vibrance_strength=0.4,oled_strength=0.1
+```
 
 ## Author
 
