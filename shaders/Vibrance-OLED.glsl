@@ -26,6 +26,20 @@
 //!MAXIMUM 1.0
 0.4
 
+//!PARAM oled_strength
+//!DESC OLED Shadow Crush Strength
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 0.2
+0.15
+
+//!PARAM cinema_strength
+//!DESC Cinematic Global Curve Strength
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 0.1
+0.04
+
 //!HOOK MAIN
 //!BIND HOOKED
 //!DESC OLED Vibrance + Cinema
@@ -117,11 +131,30 @@ vec3 apply_vibrance(vec3 color) {
     return vec3(luma) + boosted_chroma;
 }
 
+// OLED-Like Contrast Effect
+vec3 apply_oled_contrast(vec3 color) {
+    float luma = dot(color, LUMA_COEFF);
+    vec3 chroma = color - vec3(luma);
+
+    // Stage 1: Gentle Global S-curve Contrast
+    float gamma_curve = pow(luma, 1.0 + cinema_strength);
+    float s_curve = smoothstep(0.0, 1.0, gamma_curve);
+    float contrasted_luma = mix(gamma_curve, s_curve, cinema_strength);
+
+    // Stage 2: Targeted OLED Blacks Deepening
+    float shadow_mask = 1.0 - smoothstep(0.0, 0.2, luma);
+    float shadow_crush = pow(contrasted_luma, 1.0 + oled_strength);
+    contrasted_luma = mix(contrasted_luma, shadow_crush, shadow_mask);
+
+    return vec3(contrasted_luma) + chroma;
+}
+
 vec4 hook() {
     vec4 rgb_color = HOOKED_tex(HOOKED_pos);
     vec3 color = rgb_color.rgb;
 
     color = apply_vibrance(color);
+    color = apply_oled_contrast(color);
 
     return vec4(color, rgb_color.a);
 }
