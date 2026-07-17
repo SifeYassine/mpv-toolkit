@@ -18,7 +18,10 @@ local o = {
     fallback_models = "gemini-2.5-flash-lite", -- comma-separated, used in order once a model's daily quota is used up
     target_lang = "",           -- e.g. "English", "Vietnamese"; empty = no translation
     source_lang = "",           -- optional hint, e.g. "Japanese"; empty = auto-detect
+    chunk_seconds = 30,
+    overlap_seconds = 5,        -- extra audio sent on each side so boundary sentences aren't split
     thinking_budget = 0,        -- 0 = no thinking (fastest); -1 = don't send the setting
+    ffmpeg_path = "ffmpeg",
     curl_path = "curl",
 }
 
@@ -27,6 +30,8 @@ local state = {
     generation = 0,             -- bumped on file change; stale callbacks are ignored
     path = nil,
     cues = {},                  -- { start=, stop=, text=, translation= } absolute times
+    chunks = {},                -- [index] = { status = "pending"|"done"|"failed", s=, e=, fails=, retry_at= }
+    inflight = 0,
     models = {},                -- o.model followed by o.fallback_models
     model_idx = 1,
 }
@@ -121,6 +126,10 @@ local function run(args, cb)
     end)
 end
 
+local function chunk_index(t)
+    return math.floor(t / o.chunk_seconds)
+end
+
 -------------------------------------------------------------------------------
 -- gemini request
 
@@ -193,6 +202,77 @@ local function request_gemini(i, start, len, audio_file, gen)
         os.remove(req_file)
         if gen ~= state.generation then return end
         handle_response(i, start, len, res, model)
+    end)
+end
+
+-------------------------------------------------------------------------------
+-- chunk pipeline
+
+-- state.source = { input = <file or stream url>, map = <ffmpeg -map>, pre = { ffmpeg input options } }
+
+local function local_source()
+    local track = mp.get_property_native("current-tracks/audio")
+    if track and track.external and track["external-filename"] then
+        return { input = track["external-filename"], map = "0:a:0", pre = {} }
+    end
+    if track and track["ff-index"] then
+        return { input = state.path, map = "0:" .. track["ff-index"], pre = {} }
+    end
+    return { input = state.path, map = "0:a:0?", pre = {} }
+end
+
+local function chunk_bounds(i)
+    local s = i * o.chunk_seconds
+    local e = s + o.chunk_seconds
+    local dur = mp.get_property_number("duration")
+    if dur then e = math.min(e, dur) end
+    return s, e
+end
+
+local function process_chunk(i)
+    local gen = state.generation
+    local s, e = chunk_bounds(i)
+    local c = state.chunks[i] or { fails = 0 }
+    c.status, c.s, c.e = "pending", s, e
+    state.chunks[i] = c
+    state.inflight = state.inflight + 1
+
+    -- The clip sent to Gemini overlaps its neighbours, so sentences crossing a
+    -- chunk boundary are heard in full; handle_response keeps only the cues
+    -- that start inside [s, e).
+    local start = math.max(0, s - o.overlap_seconds)
+    local stop = e + o.overlap_seconds
+    local dur = mp.get_property_number("duration")
+    if dur then stop = math.min(stop, dur) end
+    local len = stop - start
+
+    local src = state.source
+    local audio_file = utils.join_path(tmpdir, string.format("gemini_subs_%s_%d.mp3", session_id, i))
+    local args = { o.ffmpeg_path, "-nostdin", "-hide_banner", "-loglevel", "error", "-y" }
+    for _, a in ipairs(src.pre) do args[#args + 1] = a end
+    for _, a in ipairs({
+        "-ss", string.format("%.3f", start), "-t", string.format("%.3f", len),
+        "-i", src.input, "-map", src.map, "-vn", "-sn", "-dn",
+        "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k",
+        audio_file,
+    }) do args[#args + 1] = a end
+
+    run(args, function(ok, res, err)
+        if gen ~= state.generation then
+            os.remove(audio_file)
+            return
+        end
+        if not ok then
+            local detail = (res.stderr or err or ""):gsub("%s+$", "")
+            if res.error_string == "init" then detail = "ffmpeg not found (set ffmpeg_path)" end
+            -- stream URLs expire after a few hours; fetch a fresh one on retry
+            if src.remote and state.source == src then state.source = nil end
+            if src.ytdl and detail:find("403") then
+                detail = "stream refused (403) — yt-dlp is probably outdated, run: yt-dlp -U"
+            end
+            return chunk_failed(i, "ffmpeg: " .. detail:sub(1, 200))
+        end
+        request_gemini(i, start, len, audio_file, gen)
     end)
 end
 
