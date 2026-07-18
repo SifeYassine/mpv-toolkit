@@ -32,9 +32,12 @@ local state = {
     cues = {},                  -- { start=, stop=, text=, translation= } absolute times
     chunks = {},                -- [index] = { status = "pending"|"done"|"failed", s=, e=, fails=, retry_at= }
     inflight = 0,
+    backoff_until = 0,
     models = {},                -- o.model followed by o.fallback_models
     model_idx = 1,
 }
+
+local OWN_TOLERANCE = 1.0      -- seconds a cue may start outside its chunk and still be kept
 
 local tmpdir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
 local session_id = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
@@ -109,6 +112,22 @@ local function current_model()
     return state.models[state.model_idx]
 end
 
+-- Accepts "MM:SS.mmm", "HH:MM:SS.mmm", "SS.mmm", "MM:SS,mmm" or a number.
+local function parse_ts(s)
+    if type(s) == "number" then return s end
+    if type(s) ~= "string" then return nil end
+    s = s:gsub(",", "."):gsub("%s", "")
+    local t, count = 0, 0
+    for part in s:gmatch("[^:]+") do
+        local v = tonumber(part)
+        if not v then return nil end
+        t = t * 60 + v
+        count = count + 1
+    end
+    if count == 0 then return nil end
+    return t
+end
+
 local function osd(text, secs)
     mp.osd_message("Gemini subs: " .. text, secs or 3)
 end
@@ -175,6 +194,134 @@ local function build_body(audio_b64, len)
     return '{"contents":[{"parts":[{"inline_data":{"mime_type":"audio/mp3","data":"'
         .. audio_b64 .. '"}},{"text":' .. json_str(build_prompt(len)) .. '}]}],'
         .. '"generationConfig":{' .. gen .. '}}'
+end
+
+local function extract_json_array(text)
+    local arr = utils.parse_json(text)
+    if type(arr) == "table" then return arr end
+    local s, e = text:find("%[.*%]")
+    if s then return utils.parse_json(text:sub(s, e)) end
+    return nil
+end
+
+local function chunk_done(i, cues)
+    local c = state.chunks[i]
+    c.status = "done"
+    state.inflight = state.inflight - 1
+    add_cues(cues, c.s, c.e)
+end
+
+local function chunk_failed(i, err, opts)
+    opts = opts or {}
+    local c = state.chunks[i]
+    c.status = "failed"
+    if not opts.no_count then c.fails = c.fails + 1 end
+    c.retry_at = mp.get_time() + (opts.delay or 5)
+    state.inflight = state.inflight - 1
+    msg.error(string.format("chunk %d: %s", i, err))
+    if not opts.quiet then osd(err, 5) end
+end
+
+-- A 429 can mean "too many per minute" (wait) or "daily quota used up" (switch model).
+local function is_daily_quota(resp)
+    local err = resp.error or {}
+    for _, d in ipairs(err.details or {}) do
+        for _, v in ipairs(d.violations or {}) do
+            if tostring(v.quotaId or ""):find("PerDay") then return true end
+        end
+    end
+    local m = (err.message or ""):lower()
+    return m:find("per day") ~= nil or m:find("perday") ~= nil
+end
+
+local function fatal(i, err)
+    chunk_failed(i, err)
+    state.chunks[i].fails = 99
+    state.enabled = false
+    render()
+    osd(err .. " — disabled", 8)
+end
+
+local function handle_response(i, start, len, res, model)
+    local out = res.stdout or ""
+    local body, code = out:match("^(.*)\n__HTTP_STATUS__(%d+)%s*$")
+    code = tonumber(code)
+    if not code then
+        return chunk_failed(i, "curl failed: " .. ((res.stderr or ""):gsub("%s+$", "")))
+    end
+    local resp = utils.parse_json(body) or {}
+
+    if code ~= 200 then
+        local emsg = (resp.error and resp.error.message) or ("HTTP " .. code)
+        if code == 429 and is_daily_quota(resp) then
+            -- several in-flight requests may report this; only the first one switches
+            if model == current_model() then
+                if state.model_idx >= #state.models then
+                    return fatal(i, "daily quota used up for " .. table.concat(state.models, ", "))
+                end
+                state.model_idx = state.model_idx + 1
+                osd(string.format("daily quota used up for %s, switching to %s", model, current_model()), 6)
+            end
+            return chunk_failed(i, "daily quota used up for " .. model,
+                { delay = 0, no_count = true, quiet = true })
+        elseif code == 429 then
+            local delay = 30
+            for _, d in ipairs(resp.error and resp.error.details or {}) do
+                local s = d.retryDelay and tonumber(tostring(d.retryDelay):match("[%d.]+"))
+                if s then delay = s + 1 end
+            end
+            state.backoff_until = mp.get_time() + delay
+            return chunk_failed(i, string.format("rate limited, retrying in %ds", delay),
+                { delay = delay, no_count = true })
+        elseif code >= 500 then
+            return chunk_failed(i, "server error (" .. code .. "), retrying", { delay = 10 })
+        end
+        return fatal(i, emsg:sub(1, 200))
+    end
+
+    local text = {}
+    local cand = resp.candidates and resp.candidates[1]
+    for _, part in ipairs(cand and cand.content and cand.content.parts or {}) do
+        if part.text and not part.thought then text[#text + 1] = part.text end
+    end
+    text = table.concat(text)
+    if text == "" then
+        local reason = (cand and cand.finishReason)
+            or (resp.promptFeedback and resp.promptFeedback.blockReason) or "empty response"
+        return chunk_failed(i, "no transcript (" .. tostring(reason) .. ")")
+    end
+
+    local arr = extract_json_array(text)
+    if type(arr) ~= "table" then
+        return chunk_failed(i, "could not parse response JSON")
+    end
+
+    -- keep cues starting inside this chunk's own range; the tolerance lets a
+    -- boundary cue survive if both neighbours time it slightly differently
+    -- (add_cues drops the resulting duplicate)
+    local chunk = state.chunks[i]
+    local own_from, own_to = chunk.s - OWN_TOLERANCE, chunk.e + OWN_TOLERANCE
+    if chunk.s <= 0 then own_from = -math.huge end
+
+    local cues = {}
+    for _, item in ipairs(arr) do
+        local s, e = parse_ts(item.start), parse_ts(item["end"])
+        local t = type(item.text) == "string" and item.text:gsub("^%s+", ""):gsub("%s+$", "") or ""
+        if s and t ~= "" and s <= len + 1 and start + s >= own_from and start + s < own_to then
+            s = math.max(0, s)
+            if not e or e <= s then e = s + 2 end
+            e = math.min(e, len + 0.5)
+            cues[#cues + 1] = {
+                start = start + s,
+                stop = start + e,
+                text = t,
+                translation = type(item.translation) == "string" and item.translation or nil,
+            }
+        end
+    end
+    msg.info(string.format("chunk %d (%.0fs-%.0fs, clip %.0fs-%.0fs): %d cues",
+        i, chunk.s, chunk.e, start, start + len, #cues))
+    chunk_done(i, cues)
 end
 
 local function request_gemini(i, start, len, audio_file, gen)
