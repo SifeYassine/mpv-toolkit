@@ -27,6 +27,7 @@ local o = {
     ffmpeg_path = "ffmpeg",
     curl_path = "curl",
     font_size = 40,
+    export_srt = true,          -- write <video>.gemini.<lang>.srt next to the video
     auto_start = false,         -- enable automatically when a file loads
 }
 
@@ -119,6 +120,10 @@ local function current_model()
     return state.models[state.model_idx]
 end
 
+local function lang_tag()
+    return o.target_lang ~= "" and (o.target_lang:lower():gsub("[^%w]+", "_")) or "orig"
+end
+
 -- Accepts "MM:SS.mmm", "HH:MM:SS.mmm", "SS.mmm", "MM:SS,mmm" or a number.
 local function parse_ts(s)
     if type(s) == "number" then return s end
@@ -133,6 +138,13 @@ local function parse_ts(s)
     end
     if count == 0 then return nil end
     return t
+end
+
+local function srt_time(t)
+    local ms = math.floor(t * 1000 + 0.5)
+    return string.format("%02d:%02d:%02d,%03d",
+        math.floor(ms / 3600000), math.floor(ms / 60000) % 60,
+        math.floor(ms / 1000) % 60, ms % 1000)
 end
 
 local function ass_escape(s)
@@ -209,6 +221,31 @@ local function render()
         overlay.data = ass
         overlay:update()
         state.last_ass = ass
+    end
+end
+
+local function srt_path()
+    if not state.path or is_url(state.path) then return nil end
+    local dir, file = utils.split_path(state.path)
+    local base = file:gsub("%.[^.]+$", "")
+    return utils.join_path(dir, base .. ".gemini." .. lang_tag() .. ".srt")
+end
+
+local function export_srt()
+    if not o.export_srt then return end
+    local path = srt_path()
+    if not path then return end
+    local out = {}
+    for i, cue in ipairs(state.cues) do
+        local text = cue.text
+        if o.target_lang ~= "" and cue.translation and cue.translation ~= "" then
+            text = o.show_original and (cue.translation .. "\n" .. cue.text) or cue.translation
+        end
+        out[#out + 1] = string.format("%d\n%s --> %s\n%s\n", i,
+            srt_time(cue.start), srt_time(cue.stop), text)
+    end
+    if not write_file(path, table.concat(out, "\n")) then
+        msg.warn("could not write " .. path)
     end
 end
 
