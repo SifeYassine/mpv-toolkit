@@ -20,11 +20,14 @@ local o = {
     source_lang = "",           -- optional hint, e.g. "Japanese"; empty = auto-detect
     show_original = false,      -- when translating, also show the original line
     chunk_seconds = 30,
+    lookahead_seconds = 90,     -- how far ahead of playback to transcribe
     overlap_seconds = 5,        -- extra audio sent on each side so boundary sentences aren't split
+    max_parallel = 2,           -- concurrent requests (free tier is ~10 requests/min)
     thinking_budget = 0,        -- 0 = no thinking (fastest); -1 = don't send the setting
     ffmpeg_path = "ffmpeg",
     curl_path = "curl",
     font_size = 40,
+    auto_start = false,         -- enable automatically when a file loads
 }
 
 local state = {
@@ -415,6 +418,8 @@ end
 -------------------------------------------------------------------------------
 -- chunk pipeline
 
+local schedule
+
 -- state.source = { input = <file or stream url>, map = <ffmpeg -map>, pre = { ffmpeg input options } }
 
 local function local_source()
@@ -426,6 +431,20 @@ local function local_source()
         return { input = state.path, map = "0:" .. track["ff-index"], pre = {} }
     end
     return { input = state.path, map = "0:a:0?", pre = {} }
+end
+
+-- Returns the audio source, or nil while it is still being resolved.
+local function audio_source()
+    if state.source then return state.source end
+    if not is_url(state.path) then
+        state.source = local_source()
+    elseif state.path:find("^https?://") and not is_direct_media(state.path) then
+        if not state.resolving then resolve_ytdl(state.generation) end
+        return nil
+    else
+        state.source = { input = state.path, map = "0:a:0?", pre = {}, remote = true }
+    end
+    return state.source
 end
 
 local function chunk_bounds(i)
@@ -483,4 +502,88 @@ local function process_chunk(i)
     end)
 end
 
+function schedule()
+    if not state.enabled or not state.path then return end
+    local pos = mp.get_property_number("time-pos")
+    if not pos then return end
+    local dur = mp.get_property_number("duration")
+
+    for i = chunk_index(pos), chunk_index(pos + o.lookahead_seconds) do
+        local s, e = chunk_bounds(i)
+        if dur and s >= dur - 0.5 then return end
+        local c = state.chunks[i]
+        if not c and is_restored(s, e) then
+            state.chunks[i] = { status = "done", s = s, e = e, fails = 0 }
+        elseif not c or (c.status == "failed" and c.fails < 3 and mp.get_time() >= c.retry_at) then
+            if state.inflight >= o.max_parallel or mp.get_time() < state.backoff_until then return end
+            if not audio_source() then return end
+            process_chunk(i)
+        end
+    end
+end
+
+-------------------------------------------------------------------------------
+-- control
+
+-- keep_source: same file, so an already resolved stream URL can be reused
+local function reset(keep_source)
+    state.generation = state.generation + 1
+    state.cues = {}
+    state.chunks = {}
+    state.restored = {}
+    state.inflight = 0
+    state.backoff_until = 0
+    if not keep_source then state.source = nil end
+    state.resolving = false
+    local path = mp.get_property("path")
+    if path and not is_url(path) then
+        path = utils.join_path(mp.get_property("working-directory", ""), path)
+    end
+    state.path = path
+    if path then load_cache() end
+    render()
+end
+
+local function enable()
+    if api_key() == "" then
+        osd("no API key — set api_key in script-opts/gemini_subs.conf or GEMINI_API_KEY", 6)
+        return
+    end
+    state.enabled = true
+    local what = o.target_lang ~= "" and ("translating to " .. o.target_lang) or "transcribing"
+    local resumed = #state.cues > 0 and string.format(", %d cached lines", #state.cues) or ""
+    osd("ON (" .. current_model() .. ", " .. what .. resumed .. ")")
+    schedule()
+    render()
+end
+
+local function toggle()
+    if state.enabled then
+        state.enabled = false
+        render()
+        osd("OFF")
+    else
+        enable()
+    end
+end
+
+options.read_options(o, "gemini_subs", function()
+    build_model_list()
+    reset()
+    if state.enabled then schedule() end
+end)
+build_model_list()
+
+mp.add_key_binding("ctrl+g", "toggle", toggle)
+-- Stremio sends ctrl combos with an uppercase letter ("CTRL+G"), which mpv
+-- treats as a different key
+mp.add_key_binding("ctrl+G", "toggle-uppercase", toggle)
+
+mp.register_event("file-loaded", function()
+    reset()
+    if o.auto_start and not state.enabled then enable() end
+end)
+
+mp.register_event("playback-restart", schedule)
+mp.add_periodic_timer(1, schedule)
 mp.observe_property("time-pos", "number", render)
