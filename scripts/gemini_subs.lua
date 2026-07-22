@@ -18,11 +18,13 @@ local o = {
     fallback_models = "gemini-2.5-flash-lite", -- comma-separated, used in order once a model's daily quota is used up
     target_lang = "",           -- e.g. "English", "Vietnamese"; empty = no translation
     source_lang = "",           -- optional hint, e.g. "Japanese"; empty = auto-detect
+    show_original = false,      -- when translating, also show the original line
     chunk_seconds = 30,
     overlap_seconds = 5,        -- extra audio sent on each side so boundary sentences aren't split
     thinking_budget = 0,        -- 0 = no thinking (fastest); -1 = don't send the setting
     ffmpeg_path = "ffmpeg",
     curl_path = "curl",
+    font_size = 40,
 }
 
 local state = {
@@ -33,6 +35,7 @@ local state = {
     chunks = {},                -- [index] = { status = "pending"|"done"|"failed", s=, e=, fails=, retry_at= }
     inflight = 0,
     backoff_until = 0,
+    last_ass = nil,
     models = {},                -- o.model followed by o.fallback_models
     model_idx = 1,
 }
@@ -41,6 +44,7 @@ local OWN_TOLERANCE = 1.0      -- seconds a cue may start outside its chunk and 
 
 local tmpdir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
 local session_id = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
+local overlay = mp.create_osd_overlay("ass-events")
 
 -------------------------------------------------------------------------------
 -- helpers
@@ -128,6 +132,11 @@ local function parse_ts(s)
     return t
 end
 
+local function ass_escape(s)
+    s = s:gsub("\\", "\\\239\187\191"):gsub("{", "\\{")
+    return (s:gsub("\r?\n", "\\N"))
+end
+
 local function osd(text, secs)
     mp.osd_message("Gemini subs: " .. text, secs or 3)
 end
@@ -145,8 +154,59 @@ local function run(args, cb)
     end)
 end
 
+-------------------------------------------------------------------------------
+-- subtitle output
+
+local function display_text(cue)
+    if o.target_lang ~= "" and cue.translation and cue.translation ~= "" then
+        if o.show_original then
+            return ass_escape(cue.translation) .. "\\N{\\fscx80\\fscy80\\1c&HC8C8C8&}"
+                .. ass_escape(cue.text)
+        end
+        return ass_escape(cue.translation)
+    end
+    return ass_escape(cue.text)
+end
+
 local function chunk_index(t)
     return math.floor(t / o.chunk_seconds)
+end
+
+local function render()
+    if not state.enabled then
+        if state.last_ass then
+            overlay:remove()
+            state.last_ass = nil
+        end
+        return
+    end
+    local pos = mp.get_property_number("time-pos")
+    if not pos then return end
+
+    local lines = {}
+    for _, cue in ipairs(state.cues) do
+        if cue.start > pos then break end
+        if pos < cue.stop then lines[#lines + 1] = display_text(cue) end
+    end
+
+    local style = string.format("{\\an2\\fs%d\\bord2.5\\shad1\\1c&HFFFFFF&\\3c&H000000&}", o.font_size)
+    local events = {}
+    if #lines > 0 then
+        -- keep at most the two newest overlapping cues
+        local from = math.max(1, #lines - 1)
+        events[#events + 1] = style .. table.concat(lines, "\\N", from)
+    end
+    local c = state.chunks[chunk_index(pos)]
+    if not c or c.status ~= "done" then
+        events[#events + 1] = "{\\an9\\fs18\\bord1.5\\1c&HB0E0FF&}Gemini: transcribing..."
+    end
+
+    local ass = table.concat(events, "\n")
+    if ass ~= state.last_ass then
+        overlay.data = ass
+        overlay:update()
+        state.last_ass = ass
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -423,3 +483,4 @@ local function process_chunk(i)
     end)
 end
 
+mp.observe_property("time-pos", "number", render)
