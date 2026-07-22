@@ -212,6 +212,40 @@ local function render()
     end
 end
 
+-- True when two cues cover mostly the same time span (the same line heard by
+-- two overlapping chunks).
+local function same_line(a, b)
+    local overlap = math.min(a.stop, b.stop) - math.max(a.start, b.start)
+    return overlap > 0.5 * math.min(a.stop - a.start, b.stop - b.start)
+end
+
+-- Adds a chunk's cues, replacing any older cues that started inside [s, e)
+-- (possible when a cached range only partly covered this chunk) and skipping
+-- boundary cues the neighbouring chunk already produced.
+local function add_cues(new, s, e)
+    local kept, old = {}, {}
+    for _, c in ipairs(state.cues) do
+        if c.start < s or c.start >= e then
+            kept[#kept + 1] = c
+            if c.start >= s - OWN_TOLERANCE - 7 and c.start < e + OWN_TOLERANCE then
+                old[#old + 1] = c
+            end
+        end
+    end
+    for _, c in ipairs(new) do
+        local dup = false
+        for _, k in ipairs(old) do
+            if same_line(c, k) then dup = true break end
+        end
+        if not dup then kept[#kept + 1] = c end
+    end
+    table.sort(kept, function(a, b) return a.start < b.start end)
+    state.cues = kept
+    export_srt()
+    save_cache()
+    render()
+end
+
 -------------------------------------------------------------------------------
 -- gemini request
 
