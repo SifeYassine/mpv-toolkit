@@ -29,6 +29,7 @@ local o = {
     font_size = 40,
     export_srt = true,          -- write <video>.gemini.<lang>.srt next to the video
     auto_start = false,         -- enable automatically when a file loads
+    resume = true,              -- remember finished chunks so they are never sent twice
 }
 
 local state = {
@@ -37,6 +38,7 @@ local state = {
     path = nil,
     cues = {},                  -- { start=, stop=, text=, translation= } absolute times
     chunks = {},                -- [index] = { status = "pending"|"done"|"failed", s=, e=, fails=, retry_at= }
+    restored = {},              -- merged { start, stop } time ranges already transcribed (from the cache)
     inflight = 0,
     backoff_until = 0,
     last_ass = nil,
@@ -47,6 +49,7 @@ local state = {
 local OWN_TOLERANCE = 1.0      -- seconds a cue may start outside its chunk and still be kept
 
 local tmpdir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
+local cache_dir = mp.command_native({ "expand-path", "~~/cache/gemini_subs" })
 local session_id = tostring(os.time()) .. "_" .. tostring(math.random(100000, 999999))
 local overlay = mp.create_osd_overlay("ass-events")
 
@@ -122,6 +125,43 @@ end
 
 local function lang_tag()
     return o.target_lang ~= "" and (o.target_lang:lower():gsub("[^%w]+", "_")) or "orig"
+end
+
+local function hash(s)
+    local h = 5381
+    for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+    return string.format("%.0f", h)
+end
+
+local function ensure_dir(dir)
+    if utils.file_info(dir) then return true end
+    local args = package.config:sub(1, 1) == "\\" and { "cmd", "/d", "/c", "mkdir", (dir:gsub("/", "\\")) }
+        or { "mkdir", "-p", dir }
+    mp.command_native({ name = "subprocess", args = args, playback_only = false,
+        capture_stdout = true, capture_stderr = true })
+    return utils.file_info(dir) ~= nil
+end
+
+-- Sorts and merges overlapping/adjacent { start, stop } ranges.
+local function merge_ranges(ranges)
+    table.sort(ranges, function(a, b) return a[1] < b[1] end)
+    local out = {}
+    for _, r in ipairs(ranges) do
+        local last = out[#out]
+        if last and r[1] <= last[2] + 0.05 then
+            last[2] = math.max(last[2], r[2])
+        else
+            out[#out + 1] = { r[1], r[2] }
+        end
+    end
+    return out
+end
+
+local function is_restored(s, e)
+    for _, r in ipairs(state.restored) do
+        if r[1] <= s + 0.05 and r[2] >= e - 0.05 then return true end
+    end
+    return false
 end
 
 -- Accepts "MM:SS.mmm", "HH:MM:SS.mmm", "SS.mmm", "MM:SS,mmm" or a number.
@@ -247,6 +287,68 @@ local function export_srt()
     if not write_file(path, table.concat(out, "\n")) then
         msg.warn("could not write " .. path)
     end
+end
+
+-------------------------------------------------------------------------------
+-- resume cache: ~~cache/gemini_subs/<name>_<hash>_<lang>.json
+
+local function cache_file()
+    if not state.path then return nil end
+    local name, key
+    if is_url(state.path) then
+        -- same YouTube video under any URL form (youtu.be, &t=, playlists) shares one cache
+        local yt = state.path:match("[?&]v=([%w_-]+)") or state.path:match("youtu%.be/([%w_-]+)")
+            or state.path:match("/shorts/([%w_-]+)") or state.path:match("/live/([%w_-]+)")
+        -- Stremio's local server URLs (/<infohash>/<file index>?tr=...) carry a
+        -- tracker list that can change between sessions; the path alone identifies the file
+        local local_server = state.path:match("^https?://127%.0%.0%.1:%d+(/[^?#]*)")
+            or state.path:match("^https?://localhost:%d+(/[^?#]*)")
+        key = yt and ("youtube:" .. yt) or (local_server and ("local:" .. local_server)) or state.path
+        name = mp.get_property("media-title", "")
+    else
+        local _, file = utils.split_path(state.path)
+        name = file:gsub("%.[^.]+$", "")
+        key = state.path .. "|" .. tostring(mp.get_property_number("file-size") or 0)
+    end
+    name = name:gsub("[^%w%-_]+", "_"):sub(1, 40)
+    local id = hash(key)
+    return utils.join_path(cache_dir, name .. "_" .. id .. "_" .. lang_tag() .. ".json")
+end
+
+local function save_cache()
+    if not o.resume then return end
+    local file = cache_file()
+    if not file or not ensure_dir(cache_dir) then return end
+    local ranges = {}
+    for _, r in ipairs(state.restored) do ranges[#ranges + 1] = r end
+    for _, c in pairs(state.chunks) do
+        if c.status == "done" then ranges[#ranges + 1] = { c.s, c.e } end
+    end
+    local data = utils.format_json({ version = 1, ranges = merge_ranges(ranges), cues = state.cues })
+    if not data or not write_file(file, data) then msg.warn("could not write " .. file) end
+end
+
+local function load_cache()
+    if not o.resume then return 0 end
+    local file = cache_file()
+    local data = file and read_file(file)
+    local t = data and utils.parse_json(data)
+    if type(t) ~= "table" or type(t.cues) ~= "table" or type(t.ranges) ~= "table" then return 0 end
+    for _, c in ipairs(t.cues) do
+        if type(c.start) == "number" and type(c.stop) == "number" and type(c.text) == "string" then
+            state.cues[#state.cues + 1] = c
+        end
+    end
+    local ranges = {}
+    for _, r in ipairs(t.ranges) do
+        if type(r) == "table" and tonumber(r[1]) and tonumber(r[2]) then
+            ranges[#ranges + 1] = { tonumber(r[1]), tonumber(r[2]) }
+        end
+    end
+    state.restored = merge_ranges(ranges)
+    table.sort(state.cues, function(a, b) return a.start < b.start end)
+    msg.info(string.format("resumed %d cues from %s", #state.cues, file))
+    return #state.cues
 end
 
 -- True when two cues cover mostly the same time span (the same line heard by
