@@ -25,6 +25,7 @@ local o = {
     max_parallel = 2,           -- concurrent requests (free tier is ~10 requests/min)
     thinking_budget = 0,        -- 0 = no thinking (fastest); -1 = don't send the setting
     ffmpeg_path = "ffmpeg",
+    ytdl_path = "yt-dlp",       -- used for YouTube and other web URLs
     curl_path = "curl",
     font_size = 40,
     export_srt = true,          -- write <video>.gemini.<lang>.srt next to the video
@@ -604,6 +605,79 @@ local function local_source()
         return { input = state.path, map = "0:" .. track["ff-index"], pre = {} }
     end
     return { input = state.path, map = "0:a:0?", pre = {} }
+end
+
+-- Converts mpv's ytdl-raw-options (cookies, proxy, ...) into yt-dlp arguments.
+local function ytdl_raw_args()
+    local args = {}
+    for k, v in pairs(mp.get_property_native("ytdl-raw-options") or {}) do
+        args[#args + 1] = "--" .. k
+        if v ~= "" then args[#args + 1] = v end
+    end
+    return args
+end
+
+-- Web URLs (YouTube etc.): ask yt-dlp for the direct audio stream, which ffmpeg
+-- can then seek in and cut chunks from like a local file.
+local function resolve_ytdl(gen)
+    state.resolving = true
+    local args = { o.ytdl_path, "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "-j" }
+    for _, a in ipairs(ytdl_raw_args()) do args[#args + 1] = a end
+    args[#args + 1] = "--"
+    args[#args + 1] = state.path
+    msg.info("resolving audio stream with yt-dlp")
+    run(args, function(ok, res)
+        if gen ~= state.generation then return end
+        state.resolving = false
+        local info = ok and utils.parse_json(res.stdout or "")
+        if type(info) ~= "table" or not info.url then
+            -- not a site yt-dlp knows; the URL may still be a plain media stream
+            local detail = (res.stderr or ""):gsub("%s+$", ""):match("[^\n]*$") or ""
+            if res.error_string == "init" then detail = "yt-dlp not found" end
+            msg.warn("yt-dlp: " .. detail .. " — reading the URL directly")
+            state.source = { input = state.path, map = "0:a:0?", pre = {}, remote = true }
+            schedule()
+            return
+        end
+        if info.is_live then
+            state.enabled = false
+            render()
+            osd("live streams are not supported — disabled", 6)
+            return
+        end
+        local pre, headers = {}, {}
+        for k, v in pairs(info.http_headers or {}) do
+            if k:lower() == "user-agent" then
+                pre[#pre + 1] = "-user_agent"
+                pre[#pre + 1] = v
+            else
+                headers[#headers + 1] = k .. ": " .. v .. "\r\n"
+            end
+        end
+        if #headers > 0 then
+            pre[#pre + 1] = "-headers"
+            pre[#pre + 1] = table.concat(headers)
+        end
+        state.source = { input = info.url, map = "0:a:0?", pre = pre, remote = true, ytdl = true }
+        msg.info("audio stream: " .. tostring(info.format_id or "?") .. " " .. tostring(info.ext or ""))
+        schedule()
+    end)
+end
+
+local MEDIA_EXT = { mkv = true, mp4 = true, webm = true, avi = true, mov = true, ts = true, m4v = true,
+    flv = true, wmv = true, mp3 = true, m4a = true, flac = true, ogg = true, opus = true, wav = true }
+
+-- URLs that already point at a media file (e.g. Stremio's local streaming
+-- server on 127.0.0.1:11470, debrid download links): ffmpeg reads these as-is.
+local function is_direct_media(url)
+    local host = url:match("^%a+://([^/:?#]+)") or ""
+    host = host:lower()
+    if host == "localhost" or host:find("^127%.") or host:find("^10%.") or host:find("^192%.168%.")
+        or host:find("^172%.1[6-9]%.") or host:find("^172%.2%d%.") or host:find("^172%.3[01]%.") then
+        return true
+    end
+    local ext = url:match("^[^?#]*%.(%w+)[?#]?") or ""
+    return MEDIA_EXT[ext:lower()] == true
 end
 
 -- Returns the audio source, or nil while it is still being resolved.
