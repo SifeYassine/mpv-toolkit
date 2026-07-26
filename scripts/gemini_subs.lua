@@ -18,6 +18,7 @@ local o = {
     fallback_models = "gemini-2.5-flash-lite", -- comma-separated, used in order once a model's daily quota is used up
     target_lang = "",           -- e.g. "English", "Vietnamese"; empty = no translation
     source_lang = "",           -- optional hint, e.g. "Japanese"; empty = auto-detect
+    languages = "",             -- extra languages for ctrl+l, e.g. "Arabic,English" (original + target_lang are always included)
     show_original = false,      -- when translating, also show the original line
     chunk_seconds = 30,
     lookahead_seconds = 90,     -- how far ahead of playback to transcribe
@@ -814,17 +815,71 @@ local function toggle()
     end
 end
 
+-- Languages cycled by ctrl+l: "" (original) followed by o.languages, plus
+-- target_lang from the config if it isn't listed there.
+local function language_cycle()
+    local list, seen = { "" }, { [""] = true }
+    local function add(l)
+        if not seen[l:lower()] then
+            list[#list + 1] = l
+            seen[l:lower()] = true
+        end
+    end
+    for l in o.languages:gmatch("[^,]+") do add((l:gsub("^%s+", ""):gsub("%s+$", ""))) end
+    if o.target_lang ~= "" then add(o.target_lang) end
+    if state.config_lang and state.config_lang ~= "" then add(state.config_lang) end
+    return list
+end
+
+local function cycle_language()
+    local list = language_cycle()
+    if #list < 2 then
+        osd("no languages to switch to — set languages= in gemini_subs.conf", 5)
+        return
+    end
+    local next_lang = list[1]
+    for i, l in ipairs(list) do
+        if l:lower() == o.target_lang:lower() then next_lang = list[i % #list + 1] break end
+    end
+
+    local prev = { cues = state.cues, chunks = state.chunks, restored = state.restored }
+    local had_translation = o.target_lang ~= ""
+    o.target_lang = next_lang
+    reset(state.source ~= nil)
+
+    -- Translated cues also hold the original text, so switching to the
+    -- original reuses them instead of sending everything again.
+    if next_lang == "" and had_translation and #state.cues == 0 then
+        state.cues = prev.cues
+        state.restored = prev.restored
+        for i, c in pairs(prev.chunks) do
+            if c.status == "done" then state.chunks[i] = c end
+        end
+        save_cache()
+        export_srt()
+    end
+
+    state.last_ass = nil
+    render()
+    osd("subtitles: " .. (next_lang == "" and "original language" or next_lang), 3)
+    if state.enabled then schedule() end
+end
+
 options.read_options(o, "gemini_subs", function()
     build_model_list()
+    state.config_lang = o.target_lang
     reset()
     if state.enabled then schedule() end
 end)
 build_model_list()
+state.config_lang = o.target_lang
 
 mp.add_key_binding("ctrl+g", "toggle", toggle)
 -- Stremio sends ctrl combos with an uppercase letter ("CTRL+G"), which mpv
 -- treats as a different key
 mp.add_key_binding("ctrl+G", "toggle-uppercase", toggle)
+mp.add_key_binding("ctrl+l", "cycle-language", cycle_language)
+mp.add_key_binding("ctrl+L", "cycle-language-uppercase", cycle_language)
 
 mp.register_event("file-loaded", function()
     reset()
