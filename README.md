@@ -56,6 +56,8 @@ A tiny GLSL shader plus a toggle script that mirrors the video on the GPU, so it
 
 Cycles through the `.icm` color profiles in `~~/colors` (the `colors` folder of your mpv config) and shows the active profile's name on screen. Useful to compare calibrations or switch between displays.
 
+![ICC profile cycler](screenshots/icc-cycle.jpg)
+
 | Key | Action |
 | --- | --- |
 | <kbd>Ctrl</kbd>+<kbd>I</kbd> | Next profile |
@@ -66,6 +68,8 @@ Profiles are sorted by name. Put your `.icm` files in `colors/` and restart mpv.
 ## OLED vibrance
 
 `shaders/Vibrance-OLED.glsl` boosts muted colors while leaving skin tones, midtones and highlights natural, then deepens shadows the way an OLED panel would, with a gentle cinematic contrast curve on top.
+
+![Original vs Vibrance-OLED](screenshots/vibrance-oled.jpg)
 
 Load it from `mpv.conf`:
 
@@ -91,6 +95,8 @@ glsl-shader-opts=vibrance_strength=0.4,oled_strength=0.1
 ## Gemini subtitles
 
 `scripts/gemini_subs.lua` generates subtitles for videos that don't have them. It cuts the audio ahead of the playback position into chunks, sends each chunk to the [Gemini API](https://ai.google.dev/) for transcription (and optional translation) and draws the result on screen while you watch.
+
+![Gemini subtitles translated into Arabic](screenshots/gemini-subs.jpg)
 
 - Works with local files, YouTube and other sites (through `yt-dlp`) and direct stream URLs
 - Optional translation into any language, with the original line shown underneath if you like
@@ -129,6 +135,8 @@ The free tier allows about 10 requests per minute, which is plenty with the defa
 ## Cache cleaner
 
 `scripts/cache_cleaner.lua` adds a **Cache Cleaner** submenu to the right-click menu that lists every folder inside `~~/cache` (shader cache, watch-later positions, subtitle caches, ...) with its file count. Picking one deletes the files in that folder.
+
+![Cache Cleaner submenu](screenshots/cache-cleaner.jpg)
 
 It fills the menu entry tagged `#@cache_cleaner` through the `menu-ready` / `update` script messages, so it needs a right-click menu that builds its entries from `input.conf`, such as the one in [my material-osc fork](https://github.com/SifeYassine/material-osc). Add this line to `input.conf`:
 
