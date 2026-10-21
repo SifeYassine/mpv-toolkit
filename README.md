@@ -12,6 +12,7 @@ Each tool is independent: copy only the ones you want.
 | [ICC profile cycler](#icc-profile-cycler) | `scripts/icc_cycle.lua` | Switch between the ICC profiles in your `colors` folder |
 | [OLED vibrance](#oled-vibrance) | `shaders/Vibrance-OLED.glsl` | Vibrance with skin tone protection and deeper OLED blacks |
 | [Gemini subtitles](#gemini-subtitles) | `scripts/gemini_subs.lua`, `script-opts/gemini_subs.conf` | Transcribe and translate any video into subtitles with Google Gemini |
+| [Cache cleaner](#cache-cleaner) | `scripts/cache_cleaner.lua` | Empty mpv's cache folders from the right-click menu |
 
 ## Installation
 
@@ -31,6 +32,11 @@ mpv/
 ```
 
 If you already have an `input.conf`, append the lines you need instead of replacing it.
+
+## Requirements
+
+- mpv with the GPU renderer (`vo=gpu-next` recommended, `vo=gpu` works too) for the shaders
+- Gemini subtitles additionally need `ffmpeg` and `curl`, a free Gemini API key and, for YouTube and other sites, `yt-dlp`
 
 ## Horizontal flip
 
@@ -119,6 +125,25 @@ Main options in `gemini_subs.conf`:
 | `auto_start` | `no` | Turn on automatically for every file |
 
 The free tier allows about 10 requests per minute, which is plenty with the default `max_parallel=2`.
+
+## Cache cleaner
+
+`scripts/cache_cleaner.lua` adds a **Cache Cleaner** submenu to the right-click menu that lists every folder inside `~~/cache` (shader cache, watch-later positions, subtitle caches, ...) with its file count. Picking one deletes the files in that folder.
+
+It fills the menu entry tagged `#@cache_cleaner` through the `menu-ready` / `update` script messages, so it needs a right-click menu that builds its entries from `input.conf`, such as the one in [my material-osc fork](https://github.com/SifeYassine/material-osc). Add this line to `input.conf`:
+
+```
+_   ignore   #menu: Tools > Cache Cleaner   #@cache_cleaner
+```
+
+## Key bindings
+
+| Key | Tool | Action |
+| --- | --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>H</kbd> | Horizontal flip | Toggle the mirror |
+| <kbd>Ctrl</kbd>+<kbd>I</kbd> / <kbd>Ctrl</kbd>+<kbd>J</kbd> | ICC profile cycler | Next / previous profile |
+| <kbd>Ctrl</kbd>+<kbd>G</kbd> | Gemini subtitles | Toggle AI subtitles |
+| <kbd>Ctrl</kbd>+<kbd>L</kbd> | Gemini subtitles | Switch subtitle language |
 
 ## Author
 
