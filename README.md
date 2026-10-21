@@ -42,7 +42,7 @@ If you already have an `input.conf`, append the lines you need instead of replac
 
 A tiny GLSL shader plus a toggle script that mirrors the video on the GPU, so it costs nothing in performance.
 
-![Screenshot](demo.png)
+![Horizontal flip](screenshots/hflip.jpg)
 
 - `shaders/hflip.glsl` samples the video with a mirrored X coordinate
 - `scripts/hflip.lua` adds or removes the shader and shows `hflip: On` / `hflip: Off`
