@@ -10,6 +10,7 @@
 -- opening/ending.
 
 local mp = require "mp"
+local msg = require "mp.msg"
 local options = require "mp.options"
 local ffi = require "ffi"
 local bit = require "bit"
@@ -17,6 +18,8 @@ local bit = require "bit"
 local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 
 local o = {
+  ffmpeg_path = "",
+  ffprobe_path = "",
 }
 options.read_options(o, "smart_skip")
 
@@ -153,3 +156,56 @@ local function fingerprint(pcm)
   end
   return fp
 end
+-------------------------------------------------------------------------------
+-- processes
+
+local function find_exe(name, opt)
+  if opt ~= "" then return opt end
+  for _, dir in ipairs({"~~/../", "~~/"}) do
+    local p = mp.command_native({"expand-path", dir .. name .. ".exe"})
+    if p and utils.file_info(p) then return p end
+  end
+  return name
+end
+local ffmpeg = find_exe("ffmpeg", o.ffmpeg_path)
+local ffprobe = find_exe("ffprobe", o.ffprobe_path)
+
+local running = {}
+
+local function resume(co, ...)
+  local ok, err = coroutine.resume(co, ...)
+  if not ok then msg.error(debug.traceback(co, err)) end
+end
+
+local function run(args)
+  local co = coroutine.running()
+  local id
+  id = mp.command_native_async({name = "subprocess", args = args,
+    capture_stdout = true, capture_stderr = true, playback_only = false},
+    function(ok, res, err)
+      running[id] = nil
+      resume(co, ok and res or {status = -1, stdout = "", stderr = err or ""})
+    end)
+  running[id] = true
+  return coroutine.yield()
+end
+
+local function fmt(x) return string.format("%.3f", x) end
+
+local function probe_duration(path)
+  local r = run({ffprobe, "-v", "error", "-show_entries", "format=duration",
+    "-of", "default=nw=1:nk=1", path})
+  return r.status == 0 and tonumber((r.stdout or ""):match("[%d%.]+")) or nil
+end
+
+local function decode(path, amap, ss, len)
+  local r = run({ffmpeg, "-nostdin", "-hide_banner", "-v", "error",
+    "-ss", fmt(ss), "-t", fmt(len), "-i", path, "-map", amap,
+    "-vn", "-sn", "-dn", "-ac", "1", "-ar", tostring(SR), "-f", "s16le", "-"})
+  if r.status ~= 0 or #(r.stdout or "") < N * 4 then
+    msg.verbose("audio decode failed: " .. path .. " " .. (r.stderr or ""))
+    return nil
+  end
+  return fingerprint(r.stdout)
+end
+
