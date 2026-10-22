@@ -32,6 +32,12 @@ local NB = 33                       -- bands -> 32 bit hashes
 local F_LO, F_HI = 300, 2000
 local FPS = SR / HOP
 local SILENT_MS = 1e-6              -- frame mean square below -60 dBFS
+local MATCH_BITS = 10               -- matching frame: <= 10 of 32 bits differ
+local HALF_W = 7                    -- run detection window: 15 frames (1.4 s)
+local GAP_FRAMES = 20               -- merge runs split by < 1.9 s
+local STOP_LIST = 24                -- ignore hash keys this common
+local MIN_VOTES = 4
+local MAX_PEAKS = 10
 
 local rev = ffi.new("int32_t[?]", N)
 for i = 0, N - 1 do
@@ -55,6 +61,8 @@ local bins = ffi.new("int32_t[?]", NB + 1)
 for b = 0, NB do
   bins[b] = math.floor(F_LO * (F_HI / F_LO) ^ (b / NB) * N / SR + 0.5)
 end
+local PC = ffi.new("uint8_t[65536]")
+for i = 1, 65535 do PC[i] = PC[rshift(i, 1)] + band(i, 1) end
 
 local re, im = ffi.new("double[?]", N), ffi.new("double[?]", N)
 
@@ -156,6 +164,137 @@ local function fingerprint(pcm)
   end
   return fp
 end
+
+-------------------------------------------------------------------------------
+-- matching
+
+-- 1 = match, 2 = both silent (neutral), 0 = mismatch
+local function frame_state(A, i, B, j)
+  local as, bs = A.s[i], B.s[j]
+  if as == 1 or bs == 1 then
+    return (as == 1 and bs == 1) and 2 or 0
+  end
+  local x = bxor(A.h[i], B.h[j])
+  return (PC[band(x, 0xFFFF)] + PC[rshift(x, 16)] <= MATCH_BITS) and 1 or 0
+end
+
+-- Matching runs of A against B at offset off (A index = B index + off).
+local function runs_at(A, B, off)
+  local i0 = math.max(1, off + 1)
+  local i1 = math.min(A.n - 1, off + B.n - 1)
+  local len = i1 - i0 + 1
+  local runs, total = {}, 0
+  if len < 2 * HALF_W + 1 then return runs, 0 end
+  local st = ffi.new("uint8_t[?]", len)
+  local cs = ffi.new("int32_t[?]", len + 1)
+  for p = 0, len - 1 do
+    local s = frame_state(A, i0 + p, B, i0 + p - off)
+    st[p] = s
+    cs[p + 1] = cs[p] + (s > 0 and 1 or 0)
+    if s == 1 then total = total + 1 end
+  end
+
+  local function close(seg_s, seg_e)
+    local lo = math.max(0, seg_s - HALF_W)
+    local hi = math.min(len - 1, seg_e + HALF_W)
+    -- trim to edges that look like real matches, not stray random hits
+    local s, e = lo, hi
+    while s < hi and not (st[s] == 1 and st[s + 1] > 0) do s = s + 1 end
+    while e > s and not (st[e] == 1 and st[e - 1] > 0) do e = e - 1 end
+    if e <= s then return end
+    -- silence both files share at the edges belongs to the segment
+    while s > 0 and st[s - 1] == 2 do s = s - 1 end
+    while e < len - 1 and st[e + 1] == 2 do e = e + 1 end
+    local ev = 0
+    for p = s, e do if st[p] == 1 then ev = ev + 1 end end
+    if ev * 2 >= e - s + 1 then
+      runs[#runs + 1] = {a_s = i0 + s, a_e = i0 + e,
+        b_s = i0 + s - off, b_e = i0 + e - off}
+    end
+  end
+
+  local seg_s, seg_e
+  for p = 0, len - 1 do
+    local lo, hi = math.max(0, p - HALF_W), math.min(len - 1, p + HALF_W)
+    if (cs[hi + 1] - cs[lo]) * 2 >= hi - lo + 1 then
+      if seg_e and p - seg_e <= GAP_FRAMES then
+        seg_e = p
+      else
+        if seg_s then close(seg_s, seg_e) end
+        seg_s, seg_e = p, p
+      end
+    end
+  end
+  if seg_s then close(seg_s, seg_e) end
+  return runs, total
+end
+
+-- Offsets voted for by exact matches of either 16-bit half of the hashes are
+-- verified frame by frame.
+local function find_runs(A, B)
+  local n, m = A.n, B.n
+  if n < 20 or m < 20 then return {} end
+  local idx = {}
+  for j = 1, m - 1 do
+    if B.s[j] == 0 then
+      local h = B.h[j]
+      for _, k in ipairs({rshift(h, 16), band(h, 0xFFFF) + 65536}) do
+        local l = idx[k]
+        if l then l[#l + 1] = j else idx[k] = {j} end
+      end
+    end
+  end
+  local votes = ffi.new("int32_t[?]", n + m + 2)
+  for i = 1, n - 1 do
+    if A.s[i] == 0 then
+      local h = A.h[i]
+      for _, k in ipairs({rshift(h, 16), band(h, 0xFFFF) + 65536}) do
+        local l = idx[k]
+        if l and #l <= STOP_LIST then
+          for t = 1, #l do
+            local v = i - l[t] + m
+            votes[v] = votes[v] + 1
+          end
+        end
+      end
+    end
+  end
+
+  local cand = {}
+  for k = 1, n + m do
+    local v = votes[k - 1] + votes[k] + votes[k + 1]
+    if v >= MIN_VOTES then cand[#cand + 1] = {k = k, v = v} end
+  end
+  table.sort(cand, function(a, b) return a.v > b.v end)
+  local peaks = {}
+  for _, c in ipairs(cand) do
+    local ok = true
+    for _, p in ipairs(peaks) do
+      if math.abs(p - c.k) <= 3 then ok = false break end
+    end
+    if ok then
+      peaks[#peaks + 1] = c.k
+      if #peaks >= MAX_PEAKS then break end
+    end
+  end
+
+  local all = {}
+  for _, k in ipairs(peaks) do
+    local best, best_total = nil, -1
+    for d = -1, 1 do
+      local runs, total = runs_at(A, B, k - m + d)
+      if total > best_total then best, best_total = runs, total end
+    end
+    for _, r in ipairs(best) do all[#all + 1] = r end
+  end
+  return all
+end
+
+-- time span covered by hashes a..b of a window starting at t0
+local function span(t0, a, b)
+  return t0 + ((a - 1) * HOP + N / 2) / SR, t0 + (b * HOP + N / 2) / SR
+end
+
 -------------------------------------------------------------------------------
 -- processes
 
