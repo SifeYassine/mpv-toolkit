@@ -11,6 +11,7 @@
 
 local mp = require "mp"
 local msg = require "mp.msg"
+local utils = require "mp.utils"
 local options = require "mp.options"
 local ffi = require "ffi"
 local bit = require "bit"
@@ -38,6 +39,7 @@ local GAP_FRAMES = 20               -- merge runs split by < 1.9 s
 local STOP_LIST = 24                -- ignore hash keys this common
 local MIN_VOTES = 4
 local MAX_PEAKS = 10
+local FP_MAGIC = "SSF1"
 
 local rev = ffi.new("int32_t[?]", N)
 for i = 0, N - 1 do
@@ -293,6 +295,95 @@ end
 -- time span covered by hashes a..b of a window starting at t0
 local function span(t0, a, b)
   return t0 + ((a - 1) * HOP + N / 2) / SR, t0 + (b * HOP + N / 2) / SR
+end
+
+-------------------------------------------------------------------------------
+-- storage
+
+local cache_dir = mp.command_native({"expand-path", "~~/cache/smart_skip"})
+local index_path = utils.join_path(cache_dir, "index.json")
+local index = {v = 1, files = {}, library = {}}
+
+local function cache_path(name) return utils.join_path(cache_dir, name) end
+
+local function ensure_cache_dir()
+  if utils.file_info(cache_dir) then return end
+  local args = package.config:sub(1, 1) == "\\" and
+    {"cmd", "/d", "/c", "mkdir", (cache_dir:gsub("/", "\\"))} or
+    {"mkdir", "-p", cache_dir}
+  mp.command_native({name = "subprocess", args = args, playback_only = false,
+    capture_stdout = true, capture_stderr = true})
+end
+
+local function load_index()
+  local f = io.open(index_path, "rb")
+  if not f then return end
+  local data = utils.parse_json(f:read("*a") or "")
+  f:close()
+  if type(data) == "table" and data.v == 1 then
+    index = data
+    if type(index.files) ~= "table" then index.files = {} end
+    if type(index.library) ~= "table" then index.library = {} end
+  end
+end
+
+local function save_index()
+  ensure_cache_dir()
+  local json = utils.format_json(index)
+  if not json then return end
+  local tmp = index_path .. ".tmp"
+  local f = io.open(tmp, "wb")
+  if not f then return end
+  f:write(json)
+  f:close()
+  os.remove(index_path)
+  os.rename(tmp, index_path)
+end
+
+local function save_fp(file, fp)
+  ensure_cache_dir()
+  local f = io.open(file, "wb")
+  if not f then return false end
+  local n = ffi.new("int32_t[1]", fp.n)
+  f:write(FP_MAGIC, ffi.string(n, 4), ffi.string(fp.h, 4 * fp.n),
+    ffi.string(fp.s, fp.n))
+  f:close()
+  return true
+end
+
+local function load_fp(file)
+  local f = io.open(file, "rb")
+  if not f then return nil end
+  local data = f:read("*a")
+  f:close()
+  if not data or #data < 8 or data:sub(1, 4) ~= FP_MAGIC then return nil end
+  local p = ffi.cast("const uint8_t*", data)
+  local n = ffi.cast("const int32_t*", p + 4)[0]
+  if n < 0 or #data ~= 8 + 5 * n then return nil end
+  local fp = new_fp(n)
+  ffi.copy(fp.h, p + 8, 4 * n)
+  ffi.copy(fp.s, p + 8 + 4 * n, n)
+  return fp
+end
+
+local function hash_id(str)
+  -- two 32 bit FNV-1a variants; the multiplications are shift-adds so no
+  -- precision is lost in doubles
+  local h1, h2 = bit.tobit(0x811C9DC5), 0x1B873593
+  for i = 1, #str do
+    local c = str:byte(i)
+    h1 = bxor(h1, c)
+    h1 = bit.tobit(h1 + lshift(h1, 1) + lshift(h1, 4) + lshift(h1, 7) +
+      lshift(h1, 8) + lshift(h1, 24))
+    h2 = bxor(h2, c + i)
+    h2 = bit.tobit(h2 + lshift(h2, 5) + lshift(h2, 13) + rshift(h2, 7))
+  end
+  return bit.tohex(h1) .. bit.tohex(h2)
+end
+
+local function file_id(path, info)
+  local norm = mp.command_native({"normalize-path", path}) or path
+  return hash_id(norm:lower() .. "|" .. tostring(info.size))
 end
 
 -------------------------------------------------------------------------------
