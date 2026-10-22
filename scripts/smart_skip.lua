@@ -19,6 +19,7 @@ local bit = require "bit"
 local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 
 local o = {
+  min_name_similarity = 0.5,
   ffmpeg_path = "",
   ffprobe_path = "",
 }
@@ -437,5 +438,97 @@ local function decode(path, amap, ss, len)
     return nil
   end
   return fingerprint(r.stdout)
+end
+
+
+-------------------------------------------------------------------------------
+-- candidates
+
+local VIDEO_EXT = {}
+for ext in ("mkv mp4 webm avi m4v mov ts m2ts wmv flv mpg mpeg ogv 3gp"):gmatch("%S+") do
+  VIDEO_EXT[ext] = true
+end
+
+local function tokens(name)
+  local set, count = {}, 0
+  name = name:lower():gsub("%.[^%.]+$", "")
+  for w in name:gmatch("[^%s%p]+") do
+    if not w:find("%d") and not set[w] then
+      set[w] = true
+      count = count + 1
+    end
+  end
+  return set, count
+end
+
+local function similarity(a, na, b, nb)
+  if na == 0 and nb == 0 then return 1 end
+  local inter = 0
+  for w in pairs(a) do if b[w] then inter = inter + 1 end end
+  return inter / (na + nb - inter)
+end
+
+local function numbers(name)
+  local list = {}
+  for d in name:gmatch("%d+") do list[#list + 1] = tonumber(d) end
+  return list
+end
+
+-- distance between the first numbers that differ (the episode number, mostly)
+local function ep_distance(a, b)
+  for i = 1, math.max(#a, #b) do
+    if a[i] ~= b[i] then
+      if a[i] and b[i] then return math.abs(a[i] - b[i]) end
+      return 1000
+    end
+  end
+  return 10000 -- same numbers: likely another copy of the same episode
+end
+
+-- Other episodes of the same show: in the folder, and played before.
+local function gather_candidates(cur)
+  local ta, na = tokens(cur.name)
+  local nums = numbers(cur.name)
+  local list, seen = {}, {[cur.id] = true}
+
+  local function consider(c)
+    local tb, nb = tokens(c.name)
+    c.sim = similarity(ta, na, tb, nb)
+    if c.sim >= o.min_name_similarity then
+      c.dist = ep_distance(nums, numbers(c.name))
+      c.cached = index.files[c.id] ~= nil
+      list[#list + 1] = c
+    end
+  end
+
+  for _, f in ipairs(utils.readdir(cur.dir, "files") or {}) do
+    local ext = (f:match("%.([^%.]+)$") or ""):lower()
+    if VIDEO_EXT[ext] and f ~= cur.name then
+      local path = utils.join_path(cur.dir, f)
+      local info = utils.file_info(path)
+      if info and info.is_file then
+        local id = file_id(path, info)
+        if not seen[id] then
+          seen[id] = true
+          local e = index.files[id]
+          consider({id = id, path = path, name = f, duration = e and e.duration})
+        end
+      end
+    end
+  end
+  for id, e in pairs(index.files) do
+    if not seen[id] and (e.h or e.t) then
+      seen[id] = true
+      local path = e.path and utils.file_info(e.path) and e.path or nil
+      consider({id = id, path = path, name = e.name or "", duration = e.duration})
+    end
+  end
+
+  table.sort(list, function(a, b)
+    if math.abs(a.sim - b.sim) > 0.05 then return a.sim > b.sim end
+    if a.dist ~= b.dist then return a.dist < b.dist end
+    return a.cached and not b.cached
+  end)
+  return list
 end
 
