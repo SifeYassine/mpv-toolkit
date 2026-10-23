@@ -19,11 +19,20 @@ local bit = require "bit"
 local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 
 local o = {
+  intro_min = 15,
+  intro_max = 180,
+  outro_min = 15,
+  outro_max = 240,
   min_name_similarity = 0.5,
   ffmpeg_path = "",
   ffprobe_path = "",
 }
 options.read_options(o, "smart_skip")
+
+local WINDOW = 600            -- seconds searched at each end of a file...
+local WINDOW_FRACTION = 0.4   -- ...but at most this part of it
+local MAX_CANDIDATES = 6      -- episodes compared per file
+local MAX_DECODES = 3         -- of which not yet fingerprinted
 
 -------------------------------------------------------------------------------
 -- fingerprinting
@@ -530,5 +539,130 @@ local function gather_candidates(cur)
     return a.cached and not b.cached
   end)
   return list
+end
+
+-------------------------------------------------------------------------------
+-- detection
+
+local function window_len(duration)
+  -- short files still get 5 minutes, so an opening isn't cut off
+  return math.min(WINDOW, math.max(duration * WINDOW_FRACTION,
+    math.min(300, duration)))
+end
+
+-- Fingerprint of the head ("h") or tail ("t") window of a file, cached.
+local function get_fp(f, which)
+  local e = index.files[f.id]
+  local file = cache_path(f.id .. "_" .. which .. ".fp")
+  if e and e[which] then
+    local fp = load_fp(file)
+    if fp then
+      fp.len = e[which]
+      return fp
+    end
+  end
+  if not f.path then return nil end
+  local dur = f.duration or probe_duration(f.path)
+  if not dur or dur < 60 then return nil end
+  local L = window_len(dur)
+  local fp = decode(f.path, f.amap or "0:a:0", which == "t" and dur - L or 0, L)
+  if not fp or not save_fp(file, fp) then return nil end
+  e = index.files[f.id] or {}
+  index.files[f.id] = e
+  e.name, e.path, e.duration, e.used = e.name or f.name, f.path, dur, os.time()
+  e[which] = L
+  fp.len = L
+  return fp
+end
+
+-- Union of the largest group of matches that agree on where the segment is.
+local function pick(found)
+  table.sort(found, function(a, b) return (a.e - a.s) > (b.e - b.s) end)
+  local clusters = {}
+  for _, f in ipairs(found) do
+    local home
+    for _, c in ipairs(clusters) do
+      local ov = math.min(c.core.e, f.e) - math.max(c.core.s, f.s)
+      if ov >= 0.5 * math.min(c.core.e - c.core.s, f.e - f.s) then
+        home = c
+        break
+      end
+    end
+    if home then
+      home.members[#home.members + 1] = f
+    else
+      clusters[#clusters + 1] = {core = f, members = {f}}
+    end
+  end
+  -- most agreeing sources wins; on a tie, the one a known opening/ending backs
+  local function lib(c)
+    for _, f in ipairs(c.members) do
+      if f.src == "library" then return 1 end
+    end
+    return 0
+  end
+  local best
+  for _, c in ipairs(clusters) do
+    if not best or #c.members > #best.members or
+      (#c.members == #best.members and lib(c) > lib(best)) then
+      best = c
+    end
+  end
+  if not best then return nil end
+  local seg = {s = math.huge, e = -math.huge, a_s = math.huge, a_e = -math.huge,
+    support = #best.members}
+  for _, f in ipairs(best.members) do
+    seg.s, seg.e = math.min(seg.s, f.s), math.max(seg.e, f.e)
+    seg.a_s, seg.a_e = math.min(seg.a_s, f.a_s), math.max(seg.a_e, f.a_e)
+  end
+  return seg
+end
+
+local function find_segment(cur, A, which, kind, alive)
+  local min_len, max_len = o[kind .. "_min"], o[kind .. "_max"]
+  local t0 = which == "h" and 0 or cur.duration - A.len
+  local found = {}
+
+  local function best_run(B)
+    local best
+    for _, r in ipairs(find_runs(A, B)) do
+      local d = (r.a_e - r.a_s + 1) / FPS
+      if d > max_len then return nil end -- same episode, another copy
+      if d >= min_len and (not best or r.a_e - r.a_s > best.a_e - best.a_s) then
+        best = r
+      end
+    end
+    return best
+  end
+
+  local function add(r, src)
+    local s, e = span(t0, r.a_s, r.a_e)
+    found[#found + 1] = {s = s, e = e, a_s = r.a_s, a_e = r.a_e, src = src}
+  end
+
+  local lib_hit = false
+
+  local checked, decoded = 0, 0
+  for _, c in ipairs(gather_candidates(cur)) do
+    local seg = pick(found)
+    if checked >= MAX_CANDIDATES or (seg and seg.support >= 2) then break end
+    local e = index.files[c.id]
+    local cached = e and e[which]
+    if cached or (c.path and not lib_hit and decoded < MAX_DECODES) then
+      local B = get_fp(c, which)
+      if not alive() then return nil end
+      if not cached then decoded = decoded + 1 end
+      if B then
+        checked = checked + 1
+        local r = best_run(B)
+        msg.verbose(string.format("%s vs %s: %s", kind, c.name,
+          r and string.format("%.1f-%.1f", span(t0, r.a_s, r.a_e)) or "no match"))
+        if r then add(r, c.id) end
+      end
+    end
+  end
+
+  local seg = pick(found)
+  return seg
 end
 
