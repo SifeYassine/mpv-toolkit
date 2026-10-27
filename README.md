@@ -13,6 +13,7 @@ Each tool is independent: copy only the ones you want.
 | [OLED vibrance](#oled-vibrance) | `shaders/Vibrance-OLED.glsl` | Vibrance with skin tone protection and deeper OLED blacks |
 | [Gemini subtitles](#gemini-subtitles) | `scripts/gemini_subs.lua`, `script-opts/gemini_subs.conf` | Transcribe and translate any video into subtitles with Google Gemini |
 | [Cache cleaner](#cache-cleaner) | `scripts/cache_cleaner.lua` | Empty mpv's cache folders from the right-click menu |
+| [Smart skip](#smart-skip) | `scripts/smart_skip.lua`, `script-opts/smart_skip.conf` | Find and skip the openings and endings of episodes by comparing them |
 
 ## Installation
 
@@ -37,6 +38,7 @@ If you already have an `input.conf`, append the lines you need instead of replac
 
 - mpv with the GPU renderer (`vo=gpu-next` recommended, `vo=gpu` works too) for the shaders
 - Gemini subtitles additionally need `ffmpeg` and `curl`, a free Gemini API key and, for YouTube and other sites, `yt-dlp`
+- Smart skip needs an mpv build with LuaJIT (the usual Windows builds have it) plus `ffmpeg` and `ffprobe`
 
 ## Horizontal flip
 
@@ -143,6 +145,14 @@ It fills the menu entry tagged `#@cache_cleaner` through the `menu-ready` / `upd
 ```
 _   ignore   #menu: Tools > Cache Cleaner   #@cache_cleaner
 ```
+
+## Smart skip
+
+`scripts/smart_skip.lua` finds the opening and ending of episodes that have no chapters, shows them as chapters and skips them.
+
+It fingerprints the audio at the start and end of the file and compares it with other episodes of the same show: files in the same folder, episodes you played before (their fingerprints stay cached even after the files are deleted) and a library of openings and endings it already found. Audio that two episodes share is the opening or ending.
+
+Settings (length limits, how alike file names must be, silence detection, `ffmpeg`/`ffprobe` paths) are in `script-opts/smart_skip.conf`. Fingerprints are cached in `~~/cache/smart_skip`, which the cache cleaner can empty.
 
 ## Key bindings
 

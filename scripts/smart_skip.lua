@@ -8,6 +8,8 @@
 -- fingerprints stay cached after the files are deleted), and a library of
 -- openings/endings already found. Audio two episodes share is the
 -- opening/ending.
+--
+-- Settings: script-opts/smart_skip.conf
 
 local mp = require "mp"
 local msg = require "mp.msg"
@@ -431,6 +433,10 @@ local function run(args)
   return coroutine.yield()
 end
 
+local function abort_all()
+  for id in pairs(running) do mp.abort_async_command(id) end
+end
+
 local function fmt(x) return string.format("%.3f", x) end
 
 local function probe_duration(path)
@@ -454,6 +460,7 @@ end
 -- state, chapters and skipping
 
 local state = {
+  gen = 0,
   cur = nil,
   result = nil,   -- {intro = {s, e}, outro = {s, e}}, cached in the index
   injected = {},
@@ -771,3 +778,84 @@ local function find_segment(cur, A, which, kind, alive)
   return seg
 end
 
+local function has_chapter(kind)
+  local patterns = kind == "intro" and {"^op$", "^op[%s:%-]", "^opening", "^intro"}
+    or {"^ed$", "^ed[%s:%-]", "^ending", "^outro", "credits"}
+  for _, ch in ipairs(mp.get_property_native("chapter-list") or {}) do
+    if not ours(ch) then
+      local title = tostring(ch.title or ""):lower()
+      for _, p in ipairs(patterns) do
+        if title:match(p) then return true end
+      end
+    end
+  end
+  return false
+end
+
+local function pipeline(cur, alive)
+  local entry = index.files[cur.id] or {}
+  index.files[cur.id] = entry
+  entry.name, entry.path, entry.duration, entry.used =
+    cur.name, cur.path, cur.duration, os.time()
+  if type(entry.result) ~= "table" then entry.result = {} end
+  local res = entry.result
+  state.result = res
+  apply_chapters()
+
+  for _, kind in ipairs({"intro", "outro"}) do
+    if not res[kind] and not has_chapter(kind) then
+      local which = kind == "intro" and "h" or "t"
+      local A = get_fp(cur, which)
+      if not alive() then return end
+      local seg = A and find_segment(cur, A, which, kind, alive)
+      if not alive() then return end
+      if seg and not res[kind] then
+        set_segment(kind, seg.s, seg.e,
+          seg.support == 1 and "1 match" or seg.support .. " matches")
+      end
+      save_index()
+    end
+  end
+
+end
+
+local function current_file()
+  local path = mp.get_property("path")
+  if not path or path:find("^%a[%w+.-]*://") then return nil end
+  local info = utils.file_info(path)
+  if not info or not info.is_file then return nil end
+  local duration = mp.get_property_number("duration")
+  if not duration or duration < 60 then return nil end
+  local dir, name = utils.split_path(path)
+  local aid = mp.get_property_number("aid")
+  for _, t in ipairs(mp.get_property_native("track-list") or {}) do
+    if t.type == "audio" and t.id == aid and t["ff-index"] then
+      return {path = path, id = file_id(path, info), dir = dir, name = name,
+        duration = duration, amap = "0:" .. t["ff-index"]}
+    end
+  end
+  return nil
+end
+
+-------------------------------------------------------------------------------
+-- events
+
+local function reset()
+  abort_all()
+  state.gen = state.gen + 1
+  state.cur, state.result, state.gaps, state.feedback = nil, nil, nil, nil
+  state.injected = {}
+end
+
+load_index()
+
+mp.register_event("file-loaded", function()
+  reset()
+  state.cur = current_file()
+  if not state.cur then return end
+  local gen, cur = state.gen, state.cur
+  resume(coroutine.create(function()
+    pipeline(cur, function() return gen == state.gen end)
+  end))
+end)
+mp.register_event("end-file", reset)
