@@ -36,6 +36,8 @@ local WINDOW = 600            -- seconds searched at each end of a file...
 local WINDOW_FRACTION = 0.4   -- ...but at most this part of it
 local MAX_CANDIDATES = 6      -- episodes compared per file
 local MAX_DECODES = 3         -- of which not yet fingerprinted
+local MAX_FILES = 400         -- cached episodes
+local MAX_LIBRARY = 300       -- cached openings/endings
 local LABEL = {intro = "Opening", outro = "Ending"}
 
 -------------------------------------------------------------------------------
@@ -179,6 +181,13 @@ local function fingerprint(pcm)
     if has_b then emit(g, eb, sb * scale < SILENT_MS) end
   end
   return fp
+end
+
+local function slice_fp(fp, a, b)
+  local out = new_fp(b - a + 1)
+  ffi.copy(out.h, fp.h + a, 4 * out.n)
+  ffi.copy(out.s, fp.s + a, out.n)
+  return out
 end
 
 -------------------------------------------------------------------------------
@@ -341,8 +350,21 @@ local function load_index()
   end
 end
 
+local function prune(tbl, max, files)
+  local ids = {}
+  for id in pairs(tbl) do ids[#ids + 1] = id end
+  if #ids <= max then return end
+  table.sort(ids, function(a, b) return (tbl[a].used or 0) > (tbl[b].used or 0) end)
+  for i = max + 1, #ids do
+    for _, f in ipairs(files(ids[i])) do os.remove(cache_path(f)) end
+    tbl[ids[i]] = nil
+  end
+end
+
 local function save_index()
   ensure_cache_dir()
+  prune(index.files, MAX_FILES, function(id) return {id .. "_h.fp", id .. "_t.fp"} end)
+  prune(index.library, MAX_LIBRARY, function(id) return {"lib_" .. id .. ".fp"} end)
   local json = utils.format_json(index)
   if not json then return end
   local tmp = index_path .. ".tmp"
@@ -753,6 +775,13 @@ local function pick(found)
   return seg
 end
 
+local function add_to_library(kind, fp, name)
+  local lid = hash_id(name .. kind .. tostring(os.time()) .. tostring(math.random()))
+  if not save_fp(cache_path("lib_" .. lid .. ".fp"), fp) then return nil end
+  index.library[lid] = {kind = kind, name = name, used = os.time()}
+  return lid
+end
+
 local function find_segment(cur, A, which, kind, alive)
   local min_len, max_len = o[kind .. "_min"], o[kind .. "_max"]
   local t0 = which == "h" and 0 or cur.duration - A.len
@@ -776,6 +805,17 @@ local function find_segment(cur, A, which, kind, alive)
   end
 
   local lib_hit = false
+  for lid, le in pairs(index.library) do
+    if le.kind == kind then
+      local B = load_fp(cache_path("lib_" .. lid .. ".fp"))
+      local r = B and best_run(B)
+      if r and (r.b_e - r.b_s + 1) >= 0.5 * B.n then
+        add(r, "library")
+        le.used = os.time()
+        lib_hit = true
+      end
+    end
+  end
 
   local checked, decoded = 0, 0
   for _, c in ipairs(gather_candidates(cur)) do
@@ -798,6 +838,9 @@ local function find_segment(cur, A, which, kind, alive)
   end
 
   local seg = pick(found)
+  if seg and not lib_hit then
+    add_to_library(kind, slice_fp(A, seg.a_s, seg.a_e), cur.name)
+  end
   return seg
 end
 
