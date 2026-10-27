@@ -33,6 +33,7 @@ local WINDOW = 600            -- seconds searched at each end of a file...
 local WINDOW_FRACTION = 0.4   -- ...but at most this part of it
 local MAX_CANDIDATES = 6      -- episodes compared per file
 local MAX_DECODES = 3         -- of which not yet fingerprinted
+local LABEL = {intro = "Opening", outro = "Ending"}
 
 -------------------------------------------------------------------------------
 -- fingerprinting
@@ -447,6 +448,110 @@ local function decode(path, amap, ss, len)
     return nil
   end
   return fingerprint(r.stdout)
+end
+
+-------------------------------------------------------------------------------
+-- state, chapters and skipping
+
+local state = {
+  cur = nil,
+  result = nil,   -- {intro = {s, e}, outro = {s, e}}, cached in the index
+  injected = {},
+  applying = false,
+}
+
+local function osd(text, secs)
+  mp.osd_message(text, secs or 3)
+  msg.info(text)
+end
+
+local function clock(t)
+  t = math.max(0, t or 0)
+  local h, m, s = math.floor(t / 3600), math.floor(t / 60) % 60, t % 60
+  if h > 0 then return string.format("%d:%02d:%04.1f", h, m, s) end
+  return string.format("%d:%04.1f", m, s)
+end
+
+local function same_chapter(a, b)
+  return math.abs((a.time or 0) - (b.time or 0)) < 0.001 and a.title == b.title
+end
+
+local function ours(ch)
+  for _, c in ipairs(state.injected) do
+    if same_chapter(c, ch) then return true end
+  end
+  return false
+end
+
+local function our_chapters(base)
+  local res, cur = state.result, state.cur
+  if not res or not cur then return {} end
+  local list, intro, outro, D = {}, res.intro, res.outro, cur.duration
+  local first = intro or outro
+  if first and first.s > 1 then
+    local has_start = false
+    for _, ch in ipairs(base) do
+      if (ch.time or 0) <= first.s then has_start = true end
+    end
+    if not has_start then
+      list[#list + 1] = {time = 0, title = intro and "Prologue" or "Episode"}
+    end
+  end
+  if intro then
+    list[#list + 1] = {time = intro.s, title = "Opening"}
+    if not (outro and math.abs(outro.s - intro.e) < 0.5) then
+      list[#list + 1] = {time = intro.e, title = "Episode"}
+    end
+  end
+  if outro then
+    list[#list + 1] = {time = outro.s, title = "Ending"}
+    if outro.e < D - 1 then
+      list[#list + 1] = {time = outro.e,
+        title = D - outro.e <= 90 and "Preview" or "After Credits"}
+    end
+  end
+  return list
+end
+
+-- Merge our chapters into the file's own (dropping those inside a segment).
+local function apply_chapters()
+  local base = {}
+  for _, ch in ipairs(mp.get_property_native("chapter-list") or {}) do
+    if not ours(ch) then base[#base + 1] = ch end
+  end
+  local new = our_chapters(base)
+  if #new == 0 and #state.injected == 0 then return end
+  local res = state.result or {}
+  local merged = {}
+  for _, ch in ipairs(base) do
+    local t, inside = ch.time or 0, false
+    for _, seg in ipairs({res.intro or false, res.outro or false}) do
+      if seg and t > seg.s + 0.001 and t < seg.e - 0.001 and
+        not tostring(ch.title or ""):match("^Bookmark") then
+        inside = true
+      end
+    end
+    if not inside then merged[#merged + 1] = ch end
+  end
+  for _, ch in ipairs(new) do merged[#merged + 1] = ch end
+  table.sort(merged, function(a, b) return (a.time or 0) < (b.time or 0) end)
+  state.injected = new
+  state.applying = true
+  mp.set_property_native("chapter-list", merged)
+  state.applying = false
+end
+
+-- Record an opening/ending for the current file.
+local function set_segment(kind, s, e, how)
+  local cur, res = state.cur, state.result
+  if s < 2 then s = 0 end
+  if cur.duration - e < 3 then e = cur.duration end
+  local seg = {s = s, e = e}
+  res[kind] = seg
+  apply_chapters()
+  osd(string.format("Smart Skip: %s %s - %s (%s)", LABEL[kind], clock(s),
+    clock(e), how))
+  return seg
 end
 
 
