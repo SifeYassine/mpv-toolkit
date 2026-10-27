@@ -927,3 +927,14 @@ mp.register_event("file-loaded", function()
 end)
 mp.register_event("end-file", reset)
 mp.observe_property("time-pos", "number", on_time)
+mp.observe_property("chapter-list", "native", function(_, list)
+  if state.applying or #state.injected == 0 then return end
+  for _, c in ipairs(state.injected) do
+    local present = false
+    for _, ch in ipairs(list or {}) do
+      if same_chapter(c, ch) then present = true break end
+    end
+    -- another script replaced the chapter list; put ours back
+    if not present then return apply_chapters() end
+  end
+end)
