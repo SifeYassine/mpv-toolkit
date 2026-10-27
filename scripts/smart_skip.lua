@@ -21,6 +21,7 @@ local bit = require "bit"
 local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 
 local o = {
+  auto_skip = true,
   intro_min = 15,
   intro_max = 180,
   outro_min = 15,
@@ -463,6 +464,7 @@ local state = {
   gen = 0,
   cur = nil,
   result = nil,   -- {intro = {s, e}, outro = {s, e}}, cached in the index
+  flags = {},     -- per kind: inside / dismissed
   injected = {},
   applying = false,
 }
@@ -561,6 +563,27 @@ local function set_segment(kind, s, e, how)
   return seg
 end
 
+local function seek_past(to, from, extra)
+  mp.commandv("seek", fmt(to), "absolute+exact")
+end
+
+local function on_time(_, t)
+  local res = state.result
+  if not t or not res or not o.auto_skip then return end
+  for kind, f in pairs(state.flags) do
+    local seg = res[kind]
+    local inside = seg and t >= seg.s and t < seg.e - 0.05
+    if inside and not f.inside then
+      f.inside = true
+      if not f.dismissed then
+        seek_past(seg.e, t, {kind = kind})
+        osd("Skipped " .. LABEL[kind] .. " (Alt+, to undo)", 2)
+      end
+    elseif not inside and f.inside then
+      f.inside, f.dismissed = false, false
+    end
+  end
+end
 
 -------------------------------------------------------------------------------
 -- candidates
@@ -844,6 +867,7 @@ local function reset()
   abort_all()
   state.gen = state.gen + 1
   state.cur, state.result, state.gaps, state.feedback = nil, nil, nil, nil
+  state.flags = {intro = {}, outro = {}}
   state.injected = {}
 end
 
@@ -859,3 +883,4 @@ mp.register_event("file-loaded", function()
   end))
 end)
 mp.register_event("end-file", reset)
+mp.observe_property("time-pos", "number", on_time)
