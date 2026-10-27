@@ -14,6 +14,7 @@ Each tool is independent: copy only the ones you want.
 | [Gemini subtitles](#gemini-subtitles) | `scripts/gemini_subs.lua`, `script-opts/gemini_subs.conf` | Transcribe and translate any video into subtitles with Google Gemini |
 | [Cache cleaner](#cache-cleaner) | `scripts/cache_cleaner.lua` | Empty mpv's cache folders from the right-click menu |
 | [Smart skip](#smart-skip) | `scripts/smart_skip.lua`, `script-opts/smart_skip.conf` | Find and skip the openings and endings of episodes by comparing them |
+| [Delete file](#delete-file) | `scripts/delete_file.lua` | Permanently delete the playing file with one key |
 
 ## Installation
 
@@ -154,6 +155,12 @@ It fingerprints the audio at the start and end of the file and compares it with 
 
 Settings (length limits, how alike file names must be, silence detection, `ffmpeg`/`ffprobe` paths) are in `script-opts/smart_skip.conf`. Fingerprints are cached in `~~/cache/smart_skip`, which the cache cleaner can empty.
 
+## Delete file
+
+`scripts/delete_file.lua` permanently deletes the playing file with <kbd>Shift</kbd>+<kbd>Del</kbd>. It moves on to the next file in the playlist first, then deletes the file. Streams and URLs are ignored.
+
+> The file is deleted for good, not moved to the Recycle Bin.
+
 ## Key bindings
 
 | Key | Tool | Action |
@@ -162,6 +169,7 @@ Settings (length limits, how alike file names must be, silence detection, `ffmpe
 | <kbd>Ctrl</kbd>+<kbd>I</kbd> / <kbd>Ctrl</kbd>+<kbd>J</kbd> | ICC profile cycler | Next / previous profile |
 | <kbd>Ctrl</kbd>+<kbd>G</kbd> | Gemini subtitles | Toggle AI subtitles |
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> | Gemini subtitles | Switch subtitle language |
+| <kbd>Shift</kbd>+<kbd>Del</kbd> | Delete file | Delete the playing file |
 
 ## Author
 
