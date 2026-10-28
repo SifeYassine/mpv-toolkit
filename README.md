@@ -153,6 +153,12 @@ _   ignore   #menu: Tools > Cache Cleaner   #@cache_cleaner
 
 It fingerprints the audio at the start and end of the file and compares it with other episodes of the same show: files in the same folder, episodes you played before (their fingerprints stay cached even after the files are deleted) and a library of openings and endings it already found. Audio that two episodes share is the opening or ending.
 
+- Found segments appear as **Opening** and **Ending** chapters, merged with the file's own chapters
+- Openings and endings are skipped automatically (`auto_skip=no` only marks them as chapters)
+- <kbd>Alt</kbd>+<kbd>.</kbd> skips the current opening or ending, otherwise it jumps to the next silent gap. A jump that looks like an opening or ending is learned, so later episodes skip it automatically
+- <kbd>Alt</kbd>+<kbd>,</kbd> undoes the last skip (and forgets what it learned)
+- Files whose own chapters already mark the opening or ending are left alone
+
 Settings (length limits, how alike file names must be, silence detection, `ffmpeg`/`ffprobe` paths) are in `script-opts/smart_skip.conf`. Fingerprints are cached in `~~/cache/smart_skip`, which the cache cleaner can empty.
 
 ## Delete file
@@ -169,6 +175,8 @@ Settings (length limits, how alike file names must be, silence detection, `ffmpe
 | <kbd>Ctrl</kbd>+<kbd>I</kbd> / <kbd>Ctrl</kbd>+<kbd>J</kbd> | ICC profile cycler | Next / previous profile |
 | <kbd>Ctrl</kbd>+<kbd>G</kbd> | Gemini subtitles | Toggle AI subtitles |
 | <kbd>Ctrl</kbd>+<kbd>L</kbd> | Gemini subtitles | Switch subtitle language |
+| <kbd>Alt</kbd>+<kbd>.</kbd> | Smart skip | Skip the opening/ending, otherwise jump to the next silent gap |
+| <kbd>Alt</kbd>+<kbd>,</kbd> | Smart skip | Undo the last skip |
 | <kbd>Shift</kbd>+<kbd>Del</kbd> | Delete file | Delete the playing file |
 
 ## Author

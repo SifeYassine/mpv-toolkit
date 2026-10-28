@@ -27,6 +27,7 @@ local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift,
 
 local o = {
   auto_skip = true,
+  learn_from_skips = true,
   intro_min = 15,
   intro_max = 180,
   outro_min = 15,
@@ -909,6 +910,7 @@ local function pipeline(cur, alive)
       if not alive() then return end
       local seg = A and find_segment(cur, A, which, kind, alive)
       if not alive() then return end
+      -- res[kind] may have been learned from the skip key meanwhile
       if seg and not res[kind] then
         set_segment(kind, seg.s, seg.e,
           seg.support == 1 and "1 match" or seg.support .. " matches")
@@ -943,6 +945,21 @@ end
 -------------------------------------------------------------------------------
 -- skip key and undo
 
+-- Fingerprint an opening/ending learned from the skip key into the library.
+local function learn(kind, s, e, fb)
+  local cur, res = state.cur, state.result
+  local seg = set_segment(kind, s, e, "learned")
+  fb.learned, fb.learned_seg = kind, seg
+  save_index()
+  resume(coroutine.create(function()
+    local fp = decode(cur.path, cur.amap, seg.s, seg.e - seg.s)
+    -- undone while fingerprinting: don't keep it
+    if not fp or fp.n < 20 or res[kind] ~= seg then return end
+    fb.lid = add_to_library(kind, fp, cur.name)
+    save_index()
+  end))
+end
+
 -- Jump to where the sound comes back after the next silent gap, or to the
 -- end of the file if none is near.
 local function jump(t0, gaps)
@@ -962,6 +979,26 @@ local function jump(t0, gaps)
   local fb = {}
   seek_past(land, t0, fb)
   osd(string.format("Skipped %s -> %s", clock(t0), clock(land)), 2)
+
+  -- a jump that looks like an opening/ending (right length, near the start or
+  -- end, none known yet) is remembered as one
+  if not o.learn_from_skips then return end
+  local len = land - t0
+  local kind
+  if not res.intro and land <= window_len(D) and
+    len >= o.intro_min and len <= o.intro_max then
+    kind = "intro"
+  elseif not res.outro and t0 >= D - window_len(D) and
+    len >= o.outro_min and len <= o.outro_max then
+    kind = "outro"
+  end
+  if not kind then return end
+  -- pressed a moment after a gap ended: the segment starts at that gap
+  local s = t0
+  for _, g in ipairs(gaps) do
+    if g[2] <= t0 and t0 - g[2] <= 8 then s = g[2] end
+  end
+  learn(kind, s, land, fb)
 end
 
 mp.add_key_binding("Alt+.", "skip", function()
@@ -996,6 +1033,15 @@ mp.add_key_binding("Alt+,", "undo", function()
   if not fb or not res then return end
   state.feedback = nil
   if fb.kind then state.flags[fb.kind].dismissed = true end
+  if fb.learned and res[fb.learned] == fb.learned_seg then
+    res[fb.learned] = nil
+    if fb.lid then
+      index.library[fb.lid] = nil
+      os.remove(cache_path("lib_" .. fb.lid .. ".fp"))
+    end
+    apply_chapters()
+    save_index()
+  end
   mp.commandv("seek", fmt(fb.from), "absolute+exact")
   osd("Skip undone")
 end)
