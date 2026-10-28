@@ -12,6 +12,7 @@
 -- Keys (rebind in input.conf with script-binding smart_skip/<name>):
 --   Alt+.  skip  skip the opening/ending, otherwise jump to the next silent
 --                gap; a jump that looks like an opening/ending is learned
+--   Alt+,  undo  go back to before the last skip (and forget what it taught)
 --
 -- Settings: script-opts/smart_skip.conf
 
@@ -519,6 +520,7 @@ local state = {
   injected = {},
   applying = false,
   gaps = nil,
+  feedback = nil, -- last skip, for undo
 }
 
 local function osd(text, secs)
@@ -616,6 +618,8 @@ local function set_segment(kind, s, e, how)
 end
 
 local function seek_past(to, from, extra)
+  state.feedback = extra or {}
+  state.feedback.from = from
   mp.commandv("seek", fmt(to), "absolute+exact")
 end
 
@@ -986,6 +990,16 @@ mp.add_key_binding("Alt+.", "skip", function()
     jump(t, gaps)
   end))
 end)
+
+mp.add_key_binding("Alt+,", "undo", function()
+  local fb, res = state.feedback, state.result
+  if not fb or not res then return end
+  state.feedback = nil
+  if fb.kind then state.flags[fb.kind].dismissed = true end
+  mp.commandv("seek", fmt(fb.from), "absolute+exact")
+  osd("Skip undone")
+end)
+
 -------------------------------------------------------------------------------
 -- events
 
