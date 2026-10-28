@@ -9,6 +9,10 @@
 -- openings/endings already found. Audio two episodes share is the
 -- opening/ending.
 --
+-- Keys (rebind in input.conf with script-binding smart_skip/<name>):
+--   Alt+.  skip  skip the opening/ending, otherwise jump to the next silent
+--                gap; a jump that looks like an opening/ending is learned
+--
 -- Settings: script-opts/smart_skip.conf
 
 local mp = require "mp"
@@ -27,6 +31,10 @@ local o = {
   outro_min = 15,
   outro_max = 240,
   min_name_similarity = 0.5,
+  gap_noise_db = -40,
+  gap_min_duration = 0.65,
+  gap_ignore = 5,
+  gap_max_skip = 180,
   ffmpeg_path = "",
   ffprobe_path = "",
 }
@@ -479,6 +487,27 @@ local function decode(path, amap, ss, len)
   return fingerprint(r.stdout)
 end
 
+-- silent gaps ({start, end}) in [from, from + len]
+local function scan_gaps(cur, from, len)
+  local r = run({ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-v", "info",
+    "-ss", fmt(from), "-t", fmt(len), "-i", cur.path, "-map", cur.amap,
+    "-vn", "-sn", "-dn", "-af", string.format("silencedetect=noise=%sdB:d=%s",
+      o.gap_noise_db, o.gap_min_duration), "-f", "null", "-"})
+  if r.status ~= 0 then return nil end
+  local gaps, open = {}, nil
+  for line in (r.stderr or ""):gmatch("[^\r\n]+") do
+    local st = line:match("silence_start: (%-?[%d%.]+)")
+    local en = line:match("silence_end: (%-?[%d%.]+)")
+    if st then open = from + math.max(0, tonumber(st)) end
+    if en and open then
+      gaps[#gaps + 1] = {open, from + tonumber(en)}
+      open = nil
+    end
+  end
+  if open then gaps[#gaps + 1] = {open, math.min(from + len, cur.duration)} end
+  return gaps
+end
+
 -------------------------------------------------------------------------------
 -- state, chapters and skipping
 
@@ -489,6 +518,7 @@ local state = {
   flags = {},     -- per kind: inside / dismissed
   injected = {},
   applying = false,
+  gaps = nil,
 }
 
 local function osd(text, secs)
@@ -883,6 +913,9 @@ local function pipeline(cur, alive)
     end
   end
 
+  -- for the skip key; kept in memory only
+  local gaps = scan_gaps(cur, 0, cur.duration)
+  if alive() then state.gaps = gaps end
 end
 
 local function current_file()
@@ -903,6 +936,56 @@ local function current_file()
   return nil
 end
 
+-------------------------------------------------------------------------------
+-- skip key and undo
+
+-- Jump to where the sound comes back after the next silent gap, or to the
+-- end of the file if none is near.
+local function jump(t0, gaps)
+  local cur, res = state.cur, state.result
+  local D, land = cur.duration, nil
+  for _, g in ipairs(gaps) do
+    if g[1] >= t0 + o.gap_ignore then
+      if g[1] - t0 <= o.gap_max_skip then land = math.max(g[1], g[2] - 0.25) end
+      break
+    end
+  end
+  if not land and D - t0 <= o.gap_max_skip then land = D end
+  if not land then
+    osd("No silence in the next " .. clock(o.gap_max_skip))
+    return
+  end
+  local fb = {}
+  seek_past(land, t0, fb)
+  osd(string.format("Skipped %s -> %s", clock(t0), clock(land)), 2)
+end
+
+mp.add_key_binding("Alt+.", "skip", function()
+  local cur, res = state.cur, state.result
+  local t = mp.get_property_number("time-pos")
+  if not cur or not res or not t then return end
+  for kind in pairs(state.flags) do
+    local seg = res[kind]
+    if seg and t >= seg.s - 0.5 and t < seg.e - 0.5 then
+      seek_past(seg.e, t, {kind = kind})
+      osd("Skipped " .. LABEL[kind], 2)
+      return
+    end
+  end
+  if state.gaps then return jump(t, state.gaps) end
+  -- the background scan isn't done yet: scan from a little before t, so a
+  -- gap just before it can still mark where an opening starts
+  osd("Looking for silence...", 1)
+  local gen = state.gen
+  resume(coroutine.create(function()
+    local from = math.max(0, t - 10)
+    local gaps = scan_gaps(cur, from, t - from + o.gap_max_skip + 5)
+    if gen ~= state.gen or not gaps then return end
+    local now = mp.get_property_number("time-pos") or t
+    if math.abs(now - t) > 10 then return end -- user moved on meanwhile
+    jump(t, gaps)
+  end))
+end)
 -------------------------------------------------------------------------------
 -- events
 
