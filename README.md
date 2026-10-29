@@ -15,6 +15,7 @@ Each tool is independent: copy only the ones you want.
 | [Cache cleaner](#cache-cleaner) | `scripts/cache_cleaner.lua` | Empty mpv's cache folders from the right-click menu |
 | [Smart skip](#smart-skip) | `scripts/smart_skip.lua`, `script-opts/smart_skip.conf` | Find and skip the openings and endings of episodes by comparing them |
 | [Delete file](#delete-file) | `scripts/delete_file.lua` | Permanently delete the playing file with one key |
+| [Touch gestures](#touch-gestures) | `scripts/touch_gestures.lua` | Resize the window, seek and switch videos with touchpad gestures |
 
 ## Installation
 
@@ -167,6 +168,18 @@ Settings (length limits, how alike file names must be, silence detection, `ffmpe
 
 > The file is deleted for good, not moved to the Recycle Bin.
 
+## Touch gestures
+
+`scripts/touch_gestures.lua` adds mouse wheel and touchpad gestures:
+
+| Gesture | Action |
+| --- | --- |
+| <kbd>Ctrl</kbd> + scroll up/down | Resize the window (animated) |
+| Two-finger swipe left/right | Seek forward/back |
+| <kbd>Ctrl</kbd> + two-finger swipe left/right | Next/previous video (once per swipe) |
+
+Resizing and seeking follow the size of the scroll, so touchpad gestures track your fingers. <kbd>Ctrl</kbd> + scroll replaces mpv's default video zoom. To rebind them, use `script-binding touch_gestures/<name>` in `input.conf` with `grow-window`, `shrink-window`, `seek-forward`, `seek-back`, `next` or `prev`.
+
 ## Key bindings
 
 | Key | Tool | Action |
@@ -178,6 +191,8 @@ Settings (length limits, how alike file names must be, silence detection, `ffmpe
 | <kbd>Alt</kbd>+<kbd>.</kbd> | Smart skip | Skip the opening/ending, otherwise jump to the next silent gap |
 | <kbd>Alt</kbd>+<kbd>,</kbd> | Smart skip | Undo the last skip |
 | <kbd>Shift</kbd>+<kbd>Del</kbd> | Delete file | Delete the playing file |
+| <kbd>Ctrl</kbd> + scroll | Touch gestures | Resize the window |
+| Two-finger swipe (+ <kbd>Ctrl</kbd>) | Touch gestures | Seek (next/previous video) |
 
 ## Author
 
