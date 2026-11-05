@@ -142,10 +142,10 @@ The free tier allows about 10 requests per minute, which is plenty with the defa
 
 ![Cache Cleaner submenu](screenshots/cache-cleaner.jpg)
 
-It fills the menu entry tagged `#@cache_cleaner` through the `menu-ready` / `update` script messages, so it needs a right-click menu that builds its entries from `input.conf`, such as the one in [my material-osc fork](https://github.com/SifeYassine/material-osc). Add this line to `input.conf`:
+It fills the menu entry tagged `#@cache_cleaner` through the `menu-ready` / `update` script messages, so it needs a customizable right-click menu, such as the one in [my material-osc fork](https://github.com/SifeYassine/material-osc/tree/personal). Add this line to `script-opts/material-osc-menu.conf`:
 
 ```
-_   ignore   #menu: Tools > Cache Cleaner   #@cache_cleaner
+Tools > Cache Cleaner | | #@cache_cleaner
 ```
 
 ## Smart skip
