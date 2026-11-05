@@ -2,7 +2,7 @@
 -- Fills material-osc's right-click menu with a submenu listing each sub-folder
 -- inside ~~/cache.  Selecting an entry deletes all files in that folder.
 --
--- input.conf entry required:
+-- script-opts/material-osc-menu.conf entry required:
 --   Tools > Cache Cleaner | | #@cache_cleaner
 
 local mp    = require 'mp'
