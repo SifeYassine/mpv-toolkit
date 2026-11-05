@@ -3,7 +3,7 @@
 -- inside ~~/cache.  Selecting an entry deletes all files in that folder.
 --
 -- input.conf entry required:
---   _   ignore   #menu: Tools > Cache Cleaner   #@cache_cleaner
+--   Tools > Cache Cleaner | | #@cache_cleaner
 
 local mp    = require 'mp'
 local utils = require 'mp.utils'
